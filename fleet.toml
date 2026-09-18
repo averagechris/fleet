@@ -1,0 +1,186 @@
+# Fleet registry: the repos that share the standard release interface.
+#
+# Used by `nix run .#fleet-status` and by agent-driven maintenance
+# (see AGENTS.md). Every repo here is expected to expose:
+#
+# Repos may set `ecosystem = "rust"` or `ecosystem = "go"`; omitted means rust.
+#
+#   nix run .#release -- --version X.Y.Z [--submit-linux-build]
+#   nix run .#release -- --version X.Y.Z --check
+#   nix run .#ci-fmt | ci-clippy/ci-vet | static-checks | ci-test
+#
+# plus: annotated vX.Y.Z tags with attached sr.ht artifacts, release manifest at
+# builds/release-linux-x86_64.yml (explicit `hut builds submit` only — NOT
+# .builds/), CHANGELOG.md with an `## Unreleased` section, conventional commits,
+# and jj-first VCS. averagechris.srht.site is the single Pages publisher.
+
+[fleet]
+maint_workspace_root = "/Users/chris/projects/.maint"
+required_apps = [
+  "prepare-release",
+  "release-tag",
+  "release",
+  "ci-fmt",
+  "ci-test",
+]
+advisory_apps = ["static-checks"]
+
+[fleet.ecosystems.rust]
+required_apps = ["ci-clippy"]
+
+[fleet.ecosystems.go]
+required_apps = ["ci-vet"]
+
+[[repos]]
+name = "hister"
+local = "/Users/chris/projects/hister"
+pages_subdir = "hister"
+version_file = "webui/app/package.json"
+artifact_prefix = "hister"
+srht_repo = "hister"
+binaries = ["hister"]
+ecosystem = "go"
+quirks = [
+  "Go repo — ci-vet instead of ci-clippy",
+  "version source of truth is webui/app/package.json",
+  "release apps are repo-local scripts (not fleet-lib presets); prepare-release rewrites the linux manifest version itself",
+  "static-checks composes gofmt check + nixfmt flake.nix check + go vet",
+]
+
+[[repos]]
+name = "linear-cli"
+local = "/Users/chris/projects/linear-cli"
+pages_subdir = "linear-cli"
+version_file = "Cargo.toml"
+artifact_prefix = "linear-cli"
+srht_repo = "linear-cli"
+binaries = ["linear"]
+upstream = "https://github.com/Finesssee/linear-cli"
+quirks = [
+  "release docs live in .opencode/skills/release-process/SKILL.md; run ci-skills-render after editing skills",
+  "extra ci app: ci-skills-render; extra package: homebrew-artifact",
+  "keyring-only auth / no self-update / no GitHub Actions are hard policies (AGENTS.md)",
+  "upstream review cutoff tracked in AGENTS.md (v0.3.26 / 42780fb as of 2026-06-15)",
+]
+
+[[repos]]
+name = "slack-rs"
+local = "/Users/chris/projects/slack-rs"
+pages_subdir = "slack"
+version_file = "Cargo.toml"
+artifact_prefix = "slack"
+srht_repo = "slack"
+binaries = ["slack"]
+upstream = "https://github.com/tumf/slack-rs"
+quirks = [
+  "publishes under /slack with slack-v* artifacts; repo dir is slack-rs, sourcehut repo is 'slack'",
+  "trunk() may resolve to main@upstream (fork point) — verify against local main bookmark",
+  "no hosted PR CI by policy (fork policy D7); stray legacy upstream tags like v0.1.71 exist",
+  "upstream review cutoff tracked in AGENTS.md (e6a7ba03 / v0.1.71 as of 2026-07-02)",
+]
+
+[[repos]]
+name = "granola-cli"
+local = "/Users/chris/projects/granola-cli"
+pages_subdir = "granola-cli"
+version_file = "Cargo.toml"
+artifact_prefix = "granola-cli"
+srht_repo = "granola-cli"
+binaries = ["granola"]
+quirks = [
+  "binary is 'granola', crate/artifacts are 'granola-cli'",
+  "historically darwin-only artifacts; Linux artifact path is new and first compiles on first hut builds submit",
+  "build-pages/publish-pages are script-backed (scripts/*.sh); package-macos is a deprecated alias",
+  "extra ci apps: ci-deny, ci-audit, ci-machete, ci-vet",
+]
+
+[[repos]]
+name = "ctx"
+local = "/Users/chris/projects/ctx"
+pages_subdir = "ctx"
+version_file = "crates/ctx-cli/Cargo.toml"
+artifact_prefix = "ctx"
+srht_repo = "ctx"
+binaries = ["ctx"]
+upstream = "https://github.com/ctxrs/ctx"
+quirks = [
+  "cargo workspace: version lives in crates/ctx-cli/Cargo.toml; Cargo.lock package name is 'ctx'",
+  "extra ci app: ci-docs; .builds/ci.yml runs hosted CI on every push",
+  "CLI tests spawn python3 plugin helpers — preset uses ciExtraInputs = [python3]",
+  "hard fork: no analytics/self-update/SDK ports (docs/fork-plan.md); fork point 38241f0c 2026-07-02",
+]
+
+[[repos]]
+name = "starship-jj"
+local = "/Users/chris/projects/starship-jj"
+pages_subdir = "starship-jj"
+version_file = "Cargo.toml"
+artifact_prefix = "starship-jj"
+srht_repo = "starship-jj"
+binaries = ["starship-jj"]
+upstream = "https://gitlab.com/lanastara_foss/starship-jj.git"
+quirks = [
+  "fork: trunk() may resolve to main@upstream (gitlab) — verify against local main bookmark",
+  "legacy unprefixed upstream tags 0.5.0–0.7.0 exist; fork tags are vX.Y.Z",
+  "uses nixfmt (not alejandra); local ci-fmt override adds the nixfmt gate the preset lacks — other standard apps come from presets.rust",
+  "in-repo PREVIEW_ONLY guard: build-pages without --include-existing-downloads marks dist unpublishable",
+  "upstream review cutoff tracked in AGENTS.md (8ca6a957 as of 2026-03-17)",
+]
+
+[[repos]]
+name = "workctl"
+local = "/Users/chris/projects/workctl"
+pages_subdir = "workctl"
+version_file = "Cargo.toml"
+artifact_prefix = "workctl"
+srht_repo = "workctl"
+binaries = ["workctl", "workd"]
+quirks = [
+  "cargo workspace: version is [workspace.package] in ROOT Cargo.toml; prepare-release also bumps the workctl-core pin in [workspace.dependencies] and all three Cargo.lock stanzas (workctl, workctl-core, workd)",
+  "release tarball ships TWO binaries: workctl and workd",
+  "nix flake check has a pre-existing sandbox failure (cargo hits crates.io CA verify) — the ci-* apps are the real gates",
+  "local_loop tests hang in jj-only (non-colocated) workspaces — run ci-test from a git-colocated checkout",
+  ".jj-lint.toml direct-tool lints (alejandra, statix, cargo-*) need the dev shell; run via nix develop --command outside it",
+]
+
+[[repos]]
+name = "gander"
+local = "/Users/chris/projects/gander"
+pages_subdir = "gander"
+version_file = "Cargo.toml"
+artifact_prefix = "gander"
+srht_repo = "gander"
+binaries = ["gander"]
+quirks = [
+  "owner often has active work in the default workspace — ALWAYS use a jj workspace",
+  "jj lint has 13 gates (audit, deny, machete, sort, taplo, alejandra, statix, deadnix, typos, ...)",
+  "standard apps come from presets.rust (old CC/CXX-pinning ci wrappers dropped; preset's stdenv.cc suffices with sccache)",
+  "byte-reproducible release tarballs are documented behavior — preserve",
+]
+
+[[repos]]
+name = "sideshow"
+local = "/Users/chris/projects/sideshow"
+pages_subdir = "sideshow"
+version_file = "Cargo.toml"
+artifact_prefix = "sideshow"
+srht_repo = "sideshow"
+binaries = ["sideshow"]
+quirks = [
+  "tailwindcss (standalone, no node) must be on PATH at runtime for `build` — provided by the dev shell; package wrapper is a tracked follow-up",
+  "integration tests that invoke tailwind are gated on `which tailwindcss` and skip outside the dev shell",
+  "skills/ dir ships the sideshow-deck-author agent skill — keep in sync with CLI changes",
+]
+
+[[repos]]
+name = "rdny"
+local = "/Users/chris/projects/rdny"
+pages_subdir = "rdny"
+version_file = "Cargo.toml"
+artifact_prefix = "rdny"
+srht_repo = "rdny"
+binaries = ["rdny"]
+quirks = [
+  "Chrome automation CLI; default package does not bundle a browser, but rdny-bundled is exposed on Linux for browser-containing closures",
+  "extra ci apps: ci-audit, ci-deny, ci-machete, ci-sort",
+]

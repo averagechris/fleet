@@ -1,0 +1,6 @@
+{
+  "name": "web-game-fixture",
+  "private": true,
+  "version": "1.2.3",
+  "packageManager": "pnpm@10.12.4"
+}

@@ -1,0 +1,15 @@
+# Public project metadata for future averagechris fleet enrollment.
+# This file is informational today; site registry updates are manual.
+[project]
+name = "example-cli"
+description = "An example Rust CLI."
+pages_subdir = "example-cli"
+srht_repo = "example-cli"
+artifact_prefix = "example-cli"
+binaries = ["example-cli"]
+version_file = "Cargo.toml"
+homepage_tier = "more"
+downloads = true
+
+[pages]
+docs = ["overview.html", "examples.html", "demo.html", "changelog.html"]

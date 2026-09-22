@@ -150,6 +150,8 @@ pages_subdir = "gander"
 version_file = "Cargo.toml"
 artifact_prefix = "gander"
 srht_repo = "gander"
+provider = "github"
+github_repo = "averagechris/gander"
 binaries = ["gander"]
 quirks = [
   "owner often has active work in the default workspace — ALWAYS use a jj workspace",

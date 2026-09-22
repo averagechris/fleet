@@ -152,6 +152,7 @@ artifact_prefix = "gander"
 srht_repo = "gander"
 provider = "github"
 github_repo = "averagechris/gander"
+expected_platforms = ["aarch64-darwin", "x86_64-linux"]
 binaries = ["gander"]
 quirks = [
   "owner often has active work in the default workspace — ALWAYS use a jj workspace",

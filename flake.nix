@@ -62,6 +62,17 @@
         ciCheck = fixtureCi "fixture-check";
         prepareVerify = null;
       };
+      githubFixture = self.lib.fleet.presets.webGame {
+        inherit pkgs srhtPackage;
+        self = ./tests/fixtures/web-game;
+        pname = "web-game-fixture";
+        webPackage = fixtureWeb;
+        ciFmt = fixtureCi "fixture-fmt";
+        ciTest = fixtureCi "fixture-test";
+        ciCheck = fixtureCi "fixture-check";
+        prepareVerify = null;
+        releaseBackend = "github";
+      };
       formatter = pkgs.writeShellApplication {
         name = "alejandra";
         runtimeInputs = [pkgs.alejandra];
@@ -100,6 +111,11 @@
         registry-schema = pkgs.runCommand "check-fleet-registry-schema" {nativeBuildInputs = [python];} ''
           python3 ${./scripts/registry_projection.py} --registry ${./fleet.toml} > projection.toml
           python3 -c 'import tomllib; d=tomllib.load(open("projection.toml","rb")); assert len(d["repos"]) > 0'
+          touch "$out"
+        '';
+        github-check-preflight = pkgs.runCommand "check-github-release-preflight" {nativeBuildInputs = with pkgs; [coreutils git jujutsu python3];} ''
+          RELEASE_BACKEND=github RELEASE_PROGRAM=${githubFixture.apps.release.program} python3 ${./tests/release_behavior.py}
+          ${githubFixture.apps.release.program} --help | grep -q 'ref/version preflight only'
           touch "$out"
         '';
       };

@@ -26,6 +26,10 @@ nix run .#release -- --version X.Y.Z --check
 nix run .#release -- --version X.Y.Z --submit-linux-build
 ```
 
+`release --check` is a nonmutating ref/version preflight only; it does not run
+prepared-tree validation or build artifacts. The real release runs those gates
+before atomic publication, and hosted CI rechecks the published ref.
+
 The release command performs preparation, prepared-tree validation, artifact
 verification, atomic ref publication, upload, and refresh in that order. Do not
 run the lower-level release helpers as a routine release workflow.

@@ -53,6 +53,7 @@ class Fixture:
         self.collision = "prefix-game-v1.2.4-web.tar.gz"
         self.state.write_text(json.dumps({"uploads": [self.collision], "jobs": []}))
         self.log = root / "nix.log"; self.log.write_text("")
+        self.srht_log = root / "srht.log"; self.srht_log.write_text("")
         self.artifact = root / "artifact"; self.artifact.mkdir()
         tools = root / "tools"; tools.mkdir()
         executable(tools / "nix", "#!" + shutil.which("sh") + """
@@ -70,6 +71,7 @@ esac
 """)
         executable(tools / "srht", "#!" + sys.executable + """
 import json,os,sys
+p_log=os.environ['SRHT_LOG']; open(p_log,'a').write(' '.join(sys.argv[1:])+'\\n')
 p=os.environ['RELEASE_STATE']; s=json.load(open(p)); a=sys.argv[1:]
 if a[:2] == ['auth','status']: raise SystemExit(0)
 if 'artifact' in a and 'list' in a: print(json.dumps({'items':[{'filename':x} for x in s['uploads']]})); raise SystemExit(0)
@@ -82,7 +84,7 @@ if 'builds' in a and 'submit' in a:
  raise SystemExit(0)
 raise SystemExit('unexpected srht arguments: '+repr(a))
 """)
-        self.env = os.environ | {"FLEET_RELEASE_NIX": str(tools / "nix"), "FLEET_RELEASE_SRHT": str(tools / "srht"), "RELEASE_STATE": str(self.state), "RELEASE_LOG": str(self.log), "ART_DIR": str(self.artifact)}
+        self.env = os.environ | {"FLEET_RELEASE_NIX": str(tools / "nix"), "FLEET_RELEASE_SRHT": str(tools / "srht"), "RELEASE_STATE": str(self.state), "RELEASE_LOG": str(self.log), "SRHT_LOG": str(self.srht_log), "ART_DIR": str(self.artifact)}
 
     def release_run(self, *extra, env=None, ok=True):
         return run(str(self.release), "--version", "1.2.4", *extra, cwd=self.workspace, env=env or self.env, ok=ok)
@@ -104,6 +106,17 @@ def scenario_check_is_non_mutating(root, release):
     assert before_op == run("jj", "op", "log", "--no-graph", "-T", "self.id()", "-n", "1", cwd=f.workspace).stdout
     assert before_refs == run("git", f"--git-dir={f.git_dir}", "show-ref", cwd=f.workspace).stdout
     assert before_files == (f.workspace / "package.json").read_text()
+
+
+def scenario_github_check_is_preflight_only(root, release):
+    f = Fixture(root, release)
+    result = f.release_run("--check")
+    assert f.log.read_text() == "", "GitHub --check invoked preparation, validation, or artifact build"
+    assert f.srht_log.read_text() == "", "GitHub --check invoked srht"
+    output = result.stdout + result.stderr
+    assert "ref/version preflight" in output
+    assert "stops before validation and artifact work" in output
+    assert "release readiness" not in output
 
 
 def scenario_prepublication_failures(root, release):
@@ -145,6 +158,9 @@ def main():
     release = Path(os.environ["RELEASE_PROGRAM"])
     with tempfile.TemporaryDirectory() as td:
         root = Path(td); home = root / "home"; home.mkdir(); os.environ["HOME"] = str(home)
+        if os.environ.get("RELEASE_BACKEND") == "github":
+            scenario_github_check_is_preflight_only(root / "github-check", release)
+            return
         scenario_check_is_non_mutating(root / "check", release)
         scenario_prepublication_failures(root / "failures", release)
         scenario_dirty_and_stale_reject_before_prepare(root / "reject", release)

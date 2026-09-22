@@ -9,7 +9,8 @@ import os
 import pathlib
 import tomllib
 
-FIELDS = ("name", "pages_subdir", "srht_repo", "artifact_prefix", "binaries", "provider", "github_repo")
+FIELDS = ("name", "pages_subdir", "srht_repo", "artifact_prefix", "binaries", "provider", "github_repo", "expected_platforms")
+KNOWN_PLATFORMS = {"aarch64-darwin", "x86_64-darwin", "aarch64-linux", "x86_64-linux"}
 
 
 def project(config: dict) -> list[dict]:
@@ -18,7 +19,7 @@ def project(config: dict) -> list[dict]:
         row = {field: repo[field] for field in FIELDS if field in repo}
         provider = row.get("provider", "sourcehut")
         required = ("name", "pages_subdir", "artifact_prefix")
-        required += (("github_repo",) if provider == "github" else ("srht_repo",))
+        required += (("github_repo", "expected_platforms") if provider == "github" else ("srht_repo",))
         missing = [field for field in required if field not in row]
         if missing:
             raise ValueError(f"{repo.get('name', '<unnamed>')}: missing projection fields: {', '.join(missing)}")
@@ -26,6 +27,15 @@ def project(config: dict) -> list[dict]:
             raise ValueError(f"{repo.get('name', '<unnamed>')}: unsupported provider: {provider}")
         if provider == "github" and (not isinstance(row["github_repo"], str) or row["github_repo"].count("/") != 1):
             raise ValueError(f"{repo.get('name', '<unnamed>')}: github_repo must be owner/repository")
+        if provider == "github":
+            platforms = row["expected_platforms"]
+            if not isinstance(platforms, list) or not platforms or not all(isinstance(item, str) for item in platforms):
+                raise ValueError(f"{repo.get('name', '<unnamed>')}: expected_platforms must be a nonempty list")
+            if len(platforms) != len(set(platforms)):
+                raise ValueError(f"{repo.get('name', '<unnamed>')}: expected_platforms must not contain duplicates")
+            unknown = sorted(set(platforms) - KNOWN_PLATFORMS)
+            if unknown:
+                raise ValueError(f"{repo.get('name', '<unnamed>')}: unknown expected_platforms: {', '.join(unknown)}")
         rows.append(row)
     return sorted(rows, key=lambda row: row["pages_subdir"])
 

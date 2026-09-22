@@ -219,7 +219,7 @@
             cat <<'EOF'
           usage: release --version X.Y.Z [--check] [--allow-downgrade] [--submit-linux-build]
 
-          --check               verify release readiness without editing files or publishing refs
+          --check               nonmutating ref/version preflight only (not validation or artifact verification)
           --version X.Y.Z       required release version
           --allow-downgrade     permit a lower version; the target tag must still be new
           --submit-linux-build  submit the Linux release build after publication
@@ -335,7 +335,10 @@
         set -euo pipefail
         export TERM=dumb
         if [[ -n "''${FLEET_RELEASE_NIX:-}" ]]; then nix() { "$FLEET_RELEASE_NIX" "$@"; }; fi
-        usage() { printf '%s\n' 'usage: release --version X.Y.Z [--check] [--allow-downgrade]'; }
+        usage() {
+          printf '%s\n' 'usage: release --version X.Y.Z [--check] [--allow-downgrade]'
+          printf '%s\n' '  --check  nonmutating ref/version preflight only; does not run validation or build artifacts'
+        }
         version=""; check_only=0; allow_downgrade=0
         while [[ $# -gt 0 ]]; do case "$1" in
           --version) version="''${2:-}"; shift 2;;
@@ -371,7 +374,10 @@
           [[ "$base" == "$remote_main" ]] || { printf '%s\n' 'stale/diverged checkout' >&2; exit 1; }
           git --git-dir="$git_dir" show-ref --verify --quiet "refs/tags/$tag" && { printf 'local tag exists without matching remote release: %s\n' "$tag" >&2; exit 1; } || true
         fi
-        printf 'GitHub release plan (%s): %s at %s\n' "$([[ $resume == 1 ]] && printf resume || printf release)" "$tag" "$base"
+        printf 'GitHub ref/version preflight (%s): %s at %s\n' "$([[ $resume == 1 ]] && printf resume || printf release)" "$tag" "$base"
+        if [[ $check_only == 1 ]]; then
+          printf '%s\n' '--check stops before validation and artifact work; a real release runs validation before atomic push, and CI rechecks on the tag'
+        fi
         [[ $check_only == 0 || $resume == 1 ]] || exit 0
         [[ $resume == 0 ]] || { printf '%s\n' 'release refs already published; Actions owns asset completion'; exit 0; }
         args=(--version "$version"); [[ $allow_downgrade == 1 ]] && args+=(--allow-downgrade)
@@ -621,6 +627,7 @@
     prepareVerify ? null,
     extraStaticChecks ? [],
     srhtPackage ? null,
+    releaseBackend ? "sourcehut",
     ...
   }: let
     packageJson = builtins.fromJSON (builtins.readFile (self + "/${versionFile}"));
@@ -685,6 +692,7 @@
     };
     release = core.mkRelease {
       inherit pkgs pname srhtRepo versionFile versionCommand refreshTrigger prepareRelease releaseTag srhtPackage;
+      backend = releaseBackend;
       artifactPackage = releaseArtifact;
       allowLinuxBuild = false;
       ciApps = builtins.attrNames namedCi ++ ["ci-web"];

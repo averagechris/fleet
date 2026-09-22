@@ -16,3 +16,7 @@ Use jj for version control. Before handing off changes, run Python tests,
 `fleet.toml` is the full operational registry. The website consumes only the
 projection emitted by `nix run .#site-registry`; never copy operational fields
 into the website.
+
+For every release backend, `release --check` is only a nonmutating ref/version
+preflight. It does not run prepared-tree validation or build artifacts. A real
+release runs those gates before publication; GitHub CI also rechecks the tag.

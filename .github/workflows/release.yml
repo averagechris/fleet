@@ -1,0 +1,158 @@
+name: Reusable release
+
+on:
+  workflow_call:
+    inputs:
+      tag: {type: string, required: true}
+      # JSON array: [{"name":"aarch64-darwin","runner":"macos-14"},
+      #              {"name":"x86_64-linux","runner":"ubuntu-24.04"}]
+      platforms: {type: string, required: true}
+      website_repository: {type: string, required: false, default: ""}
+      website_workflow: {type: string, required: false, default: "pages.yml"}
+      github_app_id: {type: string, required: false, default: ""}
+    secrets:
+      github_app_private_key: {required: false}
+
+jobs:
+  build:
+    permissions: {contents: read}
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: ${{ fromJSON(inputs.platforms) }}
+    runs-on: ${{ matrix.platform.runner }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with: {ref: "${{ inputs.tag }}", persist-credentials: false}
+      - uses: cachix/install-nix-action@b85815f71a6de0ddee80b8a80a98d43f4bcc66c7 # v31
+      - name: Verify annotated tag checkout
+        env: {TAG: "${{ inputs.tag }}"}
+        run: |
+          set -euo pipefail
+          test "$(git cat-file -t "$TAG")" = tag
+          remote=$(git ls-remote --tags origin "refs/tags/$TAG" "refs/tags/$TAG^{}")
+          object=$(awk -v ref="refs/tags/$TAG" '$2 == ref {print $1}' <<<"$remote")
+          commit=$(awk -v ref="refs/tags/$TAG^{}" '$2 == ref {print $1}' <<<"$remote")
+          test -n "$object"; test -n "$commit"
+          test "$(git rev-parse "$TAG^{tag}")" = "$object"
+          test "$(git rev-parse "$TAG^{commit}")" = "$commit"
+          printf '%s\n%s\n' "$object" "$commit" > "release-identity-${{ matrix.platform.name }}"
+      - name: Build and verify artifact
+        env: {PLATFORM: "${{ matrix.platform.name }}", TAG: "${{ inputs.tag }}"}
+        run: |
+          set -euo pipefail
+          out=$(nix build .#release-artifact --no-link --print-out-paths)
+          mkdir upload
+          cp "$out"/*.tar.gz "$out"/*.tar.gz.sha256 upload/
+          (cd upload && shasum -a 256 -c -- *.sha256)
+          version=${TAG#v}
+          test -f "upload/${GITHUB_REPOSITORY#*/}-v${version}-${PLATFORM}.tar.gz"
+      - uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808 # v4.6.0
+        with:
+          name: "release-${{ matrix.platform.name }}"
+          path: |
+            upload/*
+            release-identity-${{ matrix.platform.name }}
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions: {contents: write}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with: {ref: "${{ inputs.tag }}", fetch-depth: 0, persist-credentials: false}
+      - uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
+        with: {pattern: release-*, path: assets, merge-multiple: true}
+      - name: Verify complete set and publish draft
+        env: {GH_TOKEN: "${{ github.token }}", TAG: "${{ inputs.tag }}", PLATFORMS: "${{ inputs.platforms }}"}
+        run: |
+          set -euo pipefail
+          test "$(git cat-file -t "$TAG")" = tag
+          remote=$(git ls-remote --tags origin "refs/tags/$TAG" "refs/tags/$TAG^{}")
+          object=$(awk -v ref="refs/tags/$TAG" '$2 == ref {print $1}' <<<"$remote")
+          commit=$(awk -v ref="refs/tags/$TAG^{}" '$2 == ref {print $1}' <<<"$remote")
+          test -n "$object"; test -n "$commit"
+          test "$(git rev-parse "$TAG^{tag}")" = "$object"
+          test "$(git rev-parse "$TAG^{commit}")" = "$commit"
+          while IFS= read -r identity; do
+            test "$(sed -n '1p' "$identity")" = "$object"
+            test "$(sed -n '2p' "$identity")" = "$commit"
+            test "$(wc -l < "$identity")" -eq 2
+          done < <(find assets -type f -name 'release-identity-*' -print)
+          test "$(find assets -type f -name 'release-identity-*' | wc -l)" -eq "$(jq length <<<"$PLATFORMS")"
+          find assets -type f -name 'release-identity-*' -delete
+          mapfile -t expected < <(python3 - <<'PY'
+          import json,os
+          repo=os.environ['GITHUB_REPOSITORY'].split('/')[-1]; version=os.environ['TAG'].removeprefix('v')
+          for p in json.loads(os.environ['PLATFORMS']):
+              n=f"{repo}-v{version}-{p['name']}.tar.gz"; print(n); print(n+'.sha256')
+          PY
+          )
+          mapfile -t actual < <(find assets -type f -printf '%f\n' | sort)
+          test "$(printf '%s\n' "${expected[@]}" | sort)" = "$(printf '%s\n' "${actual[@]}" | sort)"
+          (cd assets && shasum -a 256 -c -- *.sha256)
+          release=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" 2>/dev/null || true)
+          if [[ -n "$release" ]]; then
+            test "$(jq -r .tag_name <<<"$release")" = "$TAG" || { echo 'release tag mismatch' >&2; exit 1; }
+          else
+            gh release create "$TAG" --draft --verify-tag --target "$commit" --title "$TAG" --latest=false
+            release=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG")
+          fi
+          draft=$(jq -r .draft <<<"$release")
+          for file in assets/*; do
+            name=${file##*/}; remote=$(jq -r --arg n "$name" '.assets[]|select(.name==$n)|.url' <<<"$release")
+            if [[ -n "$remote" ]]; then
+              curl -fsSL -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/octet-stream' "$remote" -o remote
+              cmp "$file" remote || { echo "refusing to clobber differing asset: $name" >&2; exit 1; }
+            else
+              test "$draft" = true || { echo "published release is incomplete: $name" >&2; exit 1; }
+              gh release upload "$TAG" "$file"
+            fi
+          done
+          release=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG")
+          mapfile -t remote_names < <(jq -r '.assets[].name' <<<"$release" | sort)
+          test "$(printf '%s\n' "${expected[@]}" | sort)" = "$(printf '%s\n' "${remote_names[@]}")"
+          rm -rf verified; mkdir verified
+          while IFS=$'\t' read -r name url; do
+            curl -fsSL -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/octet-stream' "$url" -o "verified/$name"
+          done < <(jq -r '.assets[] | [.name,.url] | @tsv' <<<"$release")
+          (cd verified && shasum -a 256 -c -- *.sha256)
+          for file in assets/*; do cmp "$file" "verified/${file##*/}"; done
+          final_remote=$(git ls-remote --tags origin "refs/tags/$TAG" "refs/tags/$TAG^{}")
+          test "$(awk -v ref="refs/tags/$TAG" '$2 == ref {print $1}' <<<"$final_remote")" = "$object"
+          test "$(awk -v ref="refs/tags/$TAG^{}" '$2 == ref {print $1}' <<<"$final_remote")" = "$commit"
+          if [[ $(jq -r .draft <<<"$release") == true ]]; then gh release edit "$TAG" --draft=false --latest=false; fi
+      - name: Dispatch website refresh
+        if: ${{ inputs.website_repository != '' }}
+        env:
+          APP_ID: "${{ inputs.github_app_id }}"
+          APP_KEY: "${{ secrets.github_app_private_key }}"
+          TARGET: "${{ inputs.website_repository }}"
+          WORKFLOW: "${{ inputs.website_workflow }}"
+          TAG: "${{ inputs.tag }}"
+          SHA: "${{ github.sha }}"
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REPOSITORY" == averagechris/gander ]] || { echo 'untrusted reusable-workflow caller repository' >&2; exit 1; }
+          [[ "$GITHUB_REF" == "refs/tags/$TAG" ]] || { echo 'untrusted reusable-workflow caller ref' >&2; exit 1; }
+          remote=$(git ls-remote --tags origin "refs/tags/$TAG^{}")
+          commit=${remote%%$'\t'*}; [[ -n "$commit" && "$commit" == "$SHA" ]] || { echo 'caller SHA is not the release tag commit' >&2; exit 1; }
+          if [[ -z "$APP_ID" || -z "$APP_KEY" ]]; then
+            echo '::warning::GitHub App credentials absent; website dispatch skipped (hourly/manual backstop required)'; exit 0
+          fi
+          key=$(mktemp); printf '%s' "$APP_KEY" > "$key"; trap 'rm -f "$key"' EXIT
+          b64() { openssl base64 -A | tr '+/' '-_' | tr -d '='; }
+          now=$(date +%s)
+          header=$(printf '{"alg":"RS256","typ":"JWT"}' | b64)
+          payload=$(printf '{"iat":%s,"exp":%s,"iss":"%s"}' "$((now-60))" "$((now+540))" "$APP_ID" | b64)
+          signature=$(printf '%s.%s' "$header" "$payload" | openssl dgst -sha256 -sign "$key" | b64)
+          jwt="$header.$payload.$signature"
+          installation=$(curl -fsSL -H "Authorization: Bearer $jwt" -H 'Accept: application/vnd.github+json' \
+            "https://api.github.com/repos/$TARGET/installation" | jq -r .id)
+          token=$(curl -fsSL -X POST -H "Authorization: Bearer $jwt" -H 'Accept: application/vnd.github+json' \
+            "https://api.github.com/app/installations/$installation/access_tokens" \
+            -d "$(jq -nc --arg repo "${TARGET#*/}" '{repositories:[$repo],permissions:{actions:"write",contents:"read"}}')" | jq -r .token)
+          curl -fsSL -X POST -H "Authorization: Bearer $token" -H 'Accept: application/vnd.github+json' \
+            "https://api.github.com/repos/$TARGET/actions/workflows/$WORKFLOW/dispatches" \
+            -d "$(jq -nc --arg project "${GITHUB_REPOSITORY#*/}" --arg tag "$TAG" --arg sha "$commit" '{ref:"main",inputs:{project:$project,tag:$tag,sha:$sha}}')"

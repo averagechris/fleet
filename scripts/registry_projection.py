@@ -9,16 +9,23 @@ import os
 import pathlib
 import tomllib
 
-FIELDS = ("name", "pages_subdir", "srht_repo", "artifact_prefix", "binaries")
+FIELDS = ("name", "pages_subdir", "srht_repo", "artifact_prefix", "binaries", "provider", "github_repo")
 
 
 def project(config: dict) -> list[dict]:
     rows = []
     for repo in config["repos"]:
         row = {field: repo[field] for field in FIELDS if field in repo}
-        missing = [field for field in FIELDS[:4] if field not in row]
+        provider = row.get("provider", "sourcehut")
+        required = ("name", "pages_subdir", "artifact_prefix")
+        required += (("github_repo",) if provider == "github" else ("srht_repo",))
+        missing = [field for field in required if field not in row]
         if missing:
             raise ValueError(f"{repo.get('name', '<unnamed>')}: missing projection fields: {', '.join(missing)}")
+        if provider not in ("sourcehut", "github"):
+            raise ValueError(f"{repo.get('name', '<unnamed>')}: unsupported provider: {provider}")
+        if provider == "github" and (not isinstance(row["github_repo"], str) or row["github_repo"].count("/") != 1):
+            raise ValueError(f"{repo.get('name', '<unnamed>')}: github_repo must be owner/repository")
         rows.append(row)
     return sorted(rows, key=lambda row: row["pages_subdir"])
 

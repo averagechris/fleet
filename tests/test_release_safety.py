@@ -24,7 +24,7 @@ class ReleaseSafetyContract(unittest.TestCase):
         self.assertIn("release --version X.Y.Z [--check]", SOURCE)
         self.assertIn("--check) check_only=1", SOURCE)
         self.assertIn("[[ $check_only -eq 0 ]] || exit 0", SOURCE)
-        release = SOURCE[_position("mkRelease = {") : _position("mkReleaseTarball = {")]
+        release = SOURCE[_position("mkSourcehutRelease = {") : _position("mkGithubRelease = {")]
         for footgun in ("--skip-validate", "--skip-tag", "--skip-artifact"):
             self.assertNotIn(footgun, release)
 
@@ -38,7 +38,7 @@ class ReleaseSafetyContract(unittest.TestCase):
         self.assertEqual(positions, sorted(positions))
 
     def test_failed_validation_or_build_cannot_publish_refs(self) -> None:
-        release = SOURCE[_position("mkRelease = {") : _position("mkReleaseTarball = {")]
+        release = SOURCE[_position("mkSourcehutRelease = {") : _position("mkGithubRelease = {")]
         self.assertEqual(release.count("push --atomic"), 1)
         self.assertLess(release.index("(${validateScript}) < /dev/null"), release.index("push --atomic"))
         self.assertLess(release.index("nix build .#release-artifact"), release.index("push --atomic"))

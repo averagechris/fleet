@@ -91,31 +91,74 @@ jobs:
           mapfile -t actual < <(find assets -type f -printf '%f\n' | sort)
           test "$(printf '%s\n' "${expected[@]}" | sort)" = "$(printf '%s\n' "${actual[@]}" | sort)"
           (cd assets && shasum -a 256 -c -- *.sha256)
-          release=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" 2>/dev/null || true)
-          if [[ -n "$release" ]]; then
-            test "$(jq -r .tag_name <<<"$release")" = "$TAG" || { echo 'release tag mismatch' >&2; exit 1; }
-          else
+          # The by-tag endpoint excludes drafts. List every page so a retry resumes
+          # the draft rather than creating another release. An API failure is fatal.
+          find_release() {
+            local pages matches
+            pages=$(gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases?per_page=100")
+            matches=$(jq -ce --arg tag "$TAG" '[.[][] | select(.tag_name == $tag)]' <<<"$pages")
+            test "$(jq length <<<"$matches")" -le 1 || { echo 'duplicate releases for tag' >&2; return 1; }
+            jq -c '.[0] // empty' <<<"$matches"
+          }
+          check_release() {
+            jq -e --arg tag "$TAG" '
+              .tag_name == $tag and (.id | type == "number") and
+              (.draft | type == "boolean") and (.assets | type == "array") and
+              all(.assets[]; (.id | type == "number") and (.name | type == "string") and
+                (.state | type == "string"))
+            ' <<<"$release" >/dev/null || { echo 'invalid release response or tag mismatch' >&2; return 1; }
+            if jq -e 'all(.assets[]; .state == "uploaded")' <<<"$release" >/dev/null; then
+              return 0
+            fi
+            incomplete=$(jq -r '[.assets[] | select(.state != "uploaded") | .name] | join(", ")' <<<"$release")
+            echo "release contains incomplete asset(s): $incomplete; delete the incomplete asset(s) on GitHub and rerun" >&2
+            return 1
+          }
+          release=$(find_release)
+          if [[ -z "$release" ]]; then
             gh release create "$TAG" --draft --verify-tag --target "$commit" --title "$TAG" --latest=false
-            release=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG")
+            release=$(find_release)
+            test -n "$release" || { echo 'release not found after create' >&2; exit 1; }
           fi
+          check_release
+          release_id=$(jq -r .id <<<"$release")
           draft=$(jq -r .draft <<<"$release")
+          # Refuse unexpected or duplicate remote assets before any upload. A draft
+          # may contain a subset; published releases must contain the full set.
+          mapfile -t present < <(jq -r '.assets[].name' <<<"$release" | sort)
+          test "$(printf '%s\n' "${present[@]}" | sort -u)" = "$(printf '%s\n' "${present[@]}")" || { echo 'duplicate remote assets' >&2; exit 1; }
+          for name in "${present[@]}"; do
+            [[ " ${expected[*]} " == *" $name "* ]] || { echo "unexpected remote asset: $name" >&2; exit 1; }
+          done
+          # Verify existing bytes before uploading any missing asset.
           for file in assets/*; do
-            name=${file##*/}; remote=$(jq -r --arg n "$name" '.assets[]|select(.name==$n)|.url' <<<"$release")
-            if [[ -n "$remote" ]]; then
-              curl -fsSL -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/octet-stream' "$remote" -o remote
+            name=${file##*/}; asset_id=$(jq -r --arg n "$name" '.assets[] | select(.name == $n) | .id' <<<"$release")
+            if [[ -n "$asset_id" ]]; then
+              curl -fsSL -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/octet-stream' \
+                "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/assets/$asset_id" -o remote
               cmp "$file" remote || { echo "refusing to clobber differing asset: $name" >&2; exit 1; }
             else
               test "$draft" = true || { echo "published release is incomplete: $name" >&2; exit 1; }
-              gh release upload "$TAG" "$file"
             fi
           done
-          release=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG")
+          if [[ "$draft" == true ]]; then
+            for file in assets/*; do
+              name=${file##*/}; asset_id=$(jq -r --arg n "$name" '.assets[] | select(.name == $n) | .id' <<<"$release")
+              [[ -n "$asset_id" ]] && continue
+              gh release upload "$TAG" "$file"
+            done
+          fi
+          release=$(find_release)
+          test -n "$release" || { echo 'release not found after upload' >&2; exit 1; }
+          check_release
+          test "$(jq -r .id <<<"$release")" = "$release_id" || { echo 'release changed during upload' >&2; exit 1; }
           mapfile -t remote_names < <(jq -r '.assets[].name' <<<"$release" | sort)
           test "$(printf '%s\n' "${expected[@]}" | sort)" = "$(printf '%s\n' "${remote_names[@]}")"
           rm -rf verified; mkdir verified
-          while IFS=$'\t' read -r name url; do
-            curl -fsSL -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/octet-stream' "$url" -o "verified/$name"
-          done < <(jq -r '.assets[] | [.name,.url] | @tsv' <<<"$release")
+          while IFS=$'\t' read -r name asset_id; do
+            curl -fsSL -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/octet-stream' \
+              "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/assets/$asset_id" -o "verified/$name"
+          done < <(jq -r '.assets[] | [.name,.id] | @tsv' <<<"$release")
           (cd verified && shasum -a 256 -c -- *.sha256)
           for file in assets/*; do cmp "$file" "verified/${file##*/}"; done
           final_remote=$(git ls-remote --tags origin "refs/tags/$TAG" "refs/tags/$TAG^{}")

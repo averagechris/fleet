@@ -47,12 +47,11 @@ jobs:
           (cd upload && shasum -a 256 -c -- *.sha256)
           version=${TAG#v}
           test -f "upload/${GITHUB_REPOSITORY#*/}-v${version}-${PLATFORM}.tar.gz"
+          mv "release-identity-${PLATFORM}" upload/
       - uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808 # v4.6.0
         with:
           name: "release-${{ matrix.platform.name }}"
-          path: |
-            upload/*
-            release-identity-${{ matrix.platform.name }}
+          path: upload/
           if-no-files-found: error
 
   publish:

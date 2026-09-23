@@ -123,13 +123,13 @@ jobs:
           test "$(awk -v ref="refs/tags/$TAG" '$2 == ref {print $1}' <<<"$final_remote")" = "$object"
           test "$(awk -v ref="refs/tags/$TAG^{}" '$2 == ref {print $1}' <<<"$final_remote")" = "$commit"
           if [[ $(jq -r .draft <<<"$release") == true ]]; then gh release edit "$TAG" --draft=false --latest=false; fi
-      - name: Dispatch website refresh
+      - name: Verify website dispatch trust
+        id: website-dispatch
         if: ${{ inputs.website_repository != '' }}
         env:
           APP_ID: "${{ inputs.github_app_id }}"
-          APP_KEY: "${{ secrets.github_app_private_key }}"
+          HAS_APP_KEY: "${{ secrets.github_app_private_key != '' }}"
           TARGET: "${{ inputs.website_repository }}"
-          WORKFLOW: "${{ inputs.website_workflow }}"
           TAG: "${{ inputs.tag }}"
           SHA: "${{ github.sha }}"
         run: |
@@ -138,21 +138,32 @@ jobs:
           [[ "$GITHUB_REF" == "refs/tags/$TAG" ]] || { echo 'untrusted reusable-workflow caller ref' >&2; exit 1; }
           remote=$(git ls-remote --tags origin "refs/tags/$TAG^{}")
           commit=${remote%%$'\t'*}; [[ -n "$commit" && "$commit" == "$SHA" ]] || { echo 'caller SHA is not the release tag commit' >&2; exit 1; }
-          if [[ -z "$APP_ID" || -z "$APP_KEY" ]]; then
+          [[ "$TARGET" == averagechris/averagechris.github.io ]] || { echo 'untrusted website dispatch target repository' >&2; exit 1; }
+          if [[ -z "$APP_ID" || "$HAS_APP_KEY" != true ]]; then
             echo '::warning::GitHub App credentials absent; website dispatch skipped (hourly/manual backstop required)'; exit 0
           fi
-          key=$(mktemp); printf '%s' "$APP_KEY" > "$key"; trap 'rm -f "$key"' EXIT
-          b64() { openssl base64 -A | tr '+/' '-_' | tr -d '='; }
-          now=$(date +%s)
-          header=$(printf '{"alg":"RS256","typ":"JWT"}' | b64)
-          payload=$(printf '{"iat":%s,"exp":%s,"iss":"%s"}' "$((now-60))" "$((now+540))" "$APP_ID" | b64)
-          signature=$(printf '%s.%s' "$header" "$payload" | openssl dgst -sha256 -sign "$key" | b64)
-          jwt="$header.$payload.$signature"
-          installation=$(curl -fsSL -H "Authorization: Bearer $jwt" -H 'Accept: application/vnd.github+json' \
-            "https://api.github.com/repos/$TARGET/installation" | jq -r .id)
-          token=$(curl -fsSL -X POST -H "Authorization: Bearer $jwt" -H 'Accept: application/vnd.github+json' \
-            "https://api.github.com/app/installations/$installation/access_tokens" \
-            -d "$(jq -nc --arg repo "${TARGET#*/}" '{repositories:[$repo],permissions:{actions:"write",contents:"read"}}')" | jq -r .token)
-          curl -fsSL -X POST -H "Authorization: Bearer $token" -H 'Accept: application/vnd.github+json' \
-            "https://api.github.com/repos/$TARGET/actions/workflows/$WORKFLOW/dispatches" \
-            -d "$(jq -nc --arg project "${GITHUB_REPOSITORY#*/}" --arg tag "$TAG" --arg sha "$commit" '{ref:"main",inputs:{project:$project,tag:$tag,sha:$sha}}')"
+          echo 'enabled=true' >> "$GITHUB_OUTPUT"
+      - name: Mint website dispatch token
+        id: website-token
+        if: ${{ steps.website-dispatch.outputs.enabled == 'true' }}
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ inputs.github_app_id }}
+          private-key: ${{ secrets.github_app_private_key }}
+          owner: averagechris
+          repositories: averagechris.github.io
+          permission-actions: write
+          permission-contents: read
+      - name: Dispatch website refresh
+        if: ${{ steps.website-dispatch.outputs.enabled == 'true' }}
+        env:
+          GH_TOKEN: "${{ steps.website-token.outputs.token }}"
+          TARGET: "${{ inputs.website_repository }}"
+          WORKFLOW: "${{ inputs.website_workflow }}"
+          TAG: "${{ inputs.tag }}"
+          SHA: "${{ github.sha }}"
+        run: |
+          set -euo pipefail
+          jq -nc --arg project "${GITHUB_REPOSITORY#*/}" --arg tag "$TAG" --arg sha "$SHA" \
+            '{ref:"main",inputs:{project:$project,tag:$tag,sha:$sha}}' \
+            | gh api --method POST "repos/$TARGET/actions/workflows/$WORKFLOW/dispatches" --input -

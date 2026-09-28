@@ -30,30 +30,29 @@ def _job(name: str, next_name: str | None = None) -> str:
 
 
 class ReleaseWorkflowTests(unittest.TestCase):
-    def test_manual_mode_builds_without_publisher_preflight_or_publish_job(self):
-        self.assertIn("publish_release: {type: boolean, required: false, default: true}", WORKFLOW)
-        preflight = _job("preflight", "build")
-        build = _job("build", "publish")
-        publish = _job("publish", "manual-publication")
+    def test_build_only_contract_has_read_only_jobs(self):
+        build = _job("build", "manual-publication")
         manual = _job("manual-publication")
-
-        self.assertIn("if: ${{ inputs.publish_release }}", preflight)
-        self.assertIn(
-            "if: ${{ always() && (needs.preflight.result == 'success' || !inputs.publish_release) }}",
-            build,
-        )
-        self.assertIn("permissions: {contents: read}", build)
-        self.assertIn("if: ${{ inputs.publish_release }}", publish)
-        self.assertIn("if: ${{ !inputs.publish_release }}", manual)
         self.assertIn("manual publication required", manual)
-        self.assertIn("README.md#manual-github-release-publication", manual)
+        self.assertIn("averagechris/gander/blob/main/docs/release.md", manual)
+
+        # Nested reusable-workflow permissions are validated statically, even
+        # for skipped jobs. Inspect every job rather than only today's caller.
+        jobs = re.findall(r"(?ms)^  ([\w-]+):\n(.*?)(?=^  [\w-]+:\n|\Z)",
+                          WORKFLOW.split("jobs:\n", 1)[1])
+        self.assertEqual({name for name, _ in jobs}, {"build", "manual-publication"})
+        for name, job in jobs:
+            self.assertRegex(job, r"(?m)^    permissions: \{contents: read\}$", name)
+            self.assertNotIn("contents: write", job, name)
+
+        for removed in ("publish_release", "github_app_id", "github_app_private_key",
+                        "website_repository", "gh release", "gh api"):
+            self.assertNotIn(removed, WORKFLOW)
 
     def test_manual_handoff_has_no_publication_side_effects(self):
         manual = _job("manual-publication")
-        for forbidden in (
-            "gh api", "gh release", "release upload", "release edit",
-            "create-github-app-token", "workflow/dispatches",
-        ):
+        for forbidden in ("gh api", "gh release", "release upload", "release edit",
+                          "create-github-app-token", "workflow/dispatches"):
             self.assertNotIn(forbidden, manual)
         self.assertNotIn("contents: write", manual)
 
@@ -129,79 +128,6 @@ class ReleaseWorkflowTests(unittest.TestCase):
                 self.assertEqual((merged / f"release-identity-{platform}").read_text(),
                                  "07d282b8d769d1de1729a26b16ef93ca8636fb70\n"
                                  "eebbd2924740d70282604b161c66a697f7031780\n")
-
-    def test_website_token_is_pinned_and_narrowly_scoped(self):
-        self.assertIn(
-            "actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1",
-            WORKFLOW,
-        )
-        self.assertIn("owner: averagechris", WORKFLOW)
-        self.assertIn("repositories: averagechris.github.io", WORKFLOW)
-        self.assertIn("permission-actions: write", WORKFLOW)
-        self.assertIn("permission-contents: read", WORKFLOW)
-        self.assertNotIn("skip-token-revoke:", WORKFLOW)
-
-    def test_website_token_is_not_hand_rolled_or_passed_in_payload_arguments(self):
-        self.assertNotIn("openssl", WORKFLOW)
-        self.assertNotIn("access_tokens", WORKFLOW)
-        dispatch = WORKFLOW.split("- name: Dispatch website refresh", 1)[1]
-        self.assertNotIn("Authorization: Bearer", dispatch)
-        self.assertIn("gh api --method POST", WORKFLOW)
-        self.assertIn("--input -", WORKFLOW)
-
-    def test_dispatch_retains_trust_checks_and_payload_identity(self):
-        trust = _step("Verify website dispatch trust")
-        for expected in (
-            "untrusted reusable-workflow caller repository",
-            "untrusted reusable-workflow caller ref",
-            "caller SHA is not the release tag commit",
-            "untrusted website dispatch target repository",
-            "GitHub App credentials absent; website dispatch skipped",
-        ):
-            self.assertIn(expected, trust)
-        self.assertIn("project:$project,tag:$tag,sha:$sha", _step("Dispatch website refresh"))
-
-    def test_trust_checks_gate_token_mint_and_dispatch(self):
-        trust = _step("Verify website dispatch trust")
-        mint = _step("Mint website dispatch token")
-        dispatch = _step("Dispatch website refresh")
-        enabled = "steps.website-dispatch.outputs.enabled == 'true'"
-
-        for step in (mint, dispatch):
-            self.assertIn(f"if: ${{{{ {enabled} }}}}", step)
-            self.assertNotIn("always()", step)
-
-        enabled_output = "echo 'enabled=true' >> \"$GITHUB_OUTPUT\""
-        self.assertEqual(trust.count(enabled_output), 1)
-        enabled_position = trust.index(enabled_output)
-        for check in (
-            '[[ "$GITHUB_REPOSITORY" == averagechris/gander ]]',
-            '[[ "$GITHUB_REF" == "refs/tags/$TAG" ]]',
-            '[[ -n "$commit" && "$commit" == "$SHA" ]]',
-            '[[ "$TARGET" == averagechris/averagechris.github.io ]]',
-            '[[ -z "$APP_ID" || "$HAS_APP_KEY" != true ]]',
-        ):
-            self.assertLess(trust.index(check), enabled_position)
-
-    def test_private_key_is_only_revealed_to_pinned_action_after_trust(self):
-        trust = _step("Verify website dispatch trust")
-        mint = _step("Mint website dispatch token")
-        action = "actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1"
-
-        self.assertIn(action, mint)
-        self.assertIn("private-key: ${{ secrets.github_app_private_key }}", mint)
-        self.assertNotIn(action, trust)
-        self.assertNotIn("private-key:", trust)
-        self.assertEqual(WORKFLOW.count("secrets.github_app_private_key"), 2)
-        self.assertEqual(
-            WORKFLOW.count("${{ secrets.github_app_private_key }}"),
-            1,
-        )
-        self.assertLess(WORKFLOW.index("id: website-dispatch"), WORKFLOW.index(action))
-        self.assertLess(
-            WORKFLOW.index("echo 'enabled=true' >> \"$GITHUB_OUTPUT\""),
-            WORKFLOW.index(action),
-        )
 
 
 if __name__ == "__main__":

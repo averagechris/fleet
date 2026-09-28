@@ -12,18 +12,19 @@ backward-compatible `lib.mkFleetApps`. Fleet operations are exposed as
 
 SourceHut remains the default release transport. `fleet.presets.gander` is the
 explicit GitHub pilot; its local release app atomically publishes the prepared
-main commit and annotated tag, while `.github/workflows/release.yml` builds all
-configured platforms and keeps the GitHub Release drafted until every tarball
-and checksum is present and verified.
+main commit and annotated tag. `.github/workflows/release.yml` is a read-only
+artifact builder: it builds every configured platform and hands the results to
+a person for publication.
 
 ## Manual GitHub Release publication
 
-Call the reusable workflow with `publish_release: false` when GitHub Actions
-should build but not publish a release. The run verifies the annotated tag,
-builds every configured platform, verifies each checksum, and uploads one named
+Call the reusable workflow with an annotated `tag` and a JSON `platforms`
+matrix. The run verifies the remote tag object and peeled commit, builds every
+configured platform, verifies each checksum, and uploads one flat, named
 `release-<platform>` Actions artifact per platform. Its final summary reports
-**Manual publication required** and links back to the run artifacts and these
-instructions.
+**Manual publication required** and links to the run artifacts and [gander's
+publication instructions](https://github.com/averagechris/gander/blob/main/docs/release.md).
+The workflow has no automatic publication mode.
 
 Download and combine the artifacts from the successful run. Before manually
 creating or updating the GitHub Release, verify every `*.sha256` sidecar and

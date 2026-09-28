@@ -59,6 +59,6 @@ jobs:
           {
             echo '## Manual publication required'
             echo
-            echo "Download the named release artifacts and checksums from [this workflow run](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}), then follow [gander's manual publication instructions](${GITHUB_SERVER_URL}/averagechris/gander/blob/main/docs/release.md)."
+            echo "Download the named release artifacts and checksums from [this workflow run](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}), then follow the project's release guide to publish them."
           } >> "$GITHUB_STEP_SUMMARY"
-          echo 'manual publication required; use the run artifacts and gander release instructions'
+          echo 'manual publication required; use the run artifacts and follow the project release guide'

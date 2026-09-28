@@ -7,10 +7,14 @@ import argparse
 import json
 import os
 import pathlib
+import re
 import tomllib
 
-FIELDS = ("name", "pages_subdir", "srht_repo", "artifact_prefix", "binaries", "provider", "github_repo", "expected_platforms")
+FIELDS = ("name", "pages_subdir", "srht_repo", "artifact_prefix", "binaries", "provider", "github_repo", "expected_platforms", "sourcehut_through")
 KNOWN_PLATFORMS = {"aarch64-darwin", "x86_64-darwin", "aarch64-linux", "x86_64-linux"}
+SEMVER_TAG = re.compile(
+    r"^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$"
+)
 
 
 def project(config: dict) -> list[dict]:
@@ -36,6 +40,14 @@ def project(config: dict) -> list[dict]:
             unknown = sorted(set(platforms) - KNOWN_PLATFORMS)
             if unknown:
                 raise ValueError(f"{repo.get('name', '<unnamed>')}: unknown expected_platforms: {', '.join(unknown)}")
+        if "sourcehut_through" in row:
+            if provider != "github":
+                raise ValueError(f"{repo.get('name', '<unnamed>')}: sourcehut_through is only valid for the github provider")
+            if not isinstance(row.get("srht_repo"), str) or not row["srht_repo"]:
+                raise ValueError(f"{repo.get('name', '<unnamed>')}: sourcehut_through requires srht_repo")
+            boundary = row["sourcehut_through"]
+            if not isinstance(boundary, str) or not SEMVER_TAG.fullmatch(boundary):
+                raise ValueError(f"{repo.get('name', '<unnamed>')}: sourcehut_through must be a v-prefixed semver annotated-tag boundary")
         rows.append(row)
     return sorted(rows, key=lambda row: row["pages_subdir"])
 

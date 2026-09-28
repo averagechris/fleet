@@ -34,7 +34,10 @@ class ReleaseWorkflowTests(unittest.TestCase):
         build = _job("build", "manual-publication")
         manual = _job("manual-publication")
         self.assertIn("manual publication required", manual)
-        self.assertIn("averagechris/gander/blob/main/docs/release.md", manual)
+        self.assertIn("follow the project's release guide", manual)
+        self.assertIn("${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}", manual)
+        self.assertNotIn("gander", manual)
+        self.assertNotIn("docs/release.md", manual)
 
         # Nested reusable-workflow permissions are validated statically, even
         # for skipped jobs. Inspect every job rather than only today's caller.

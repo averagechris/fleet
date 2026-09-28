@@ -22,8 +22,8 @@ Call the reusable workflow with an annotated `tag` and a JSON `platforms`
 matrix. The run verifies the remote tag object and peeled commit, builds every
 configured platform, verifies each checksum, and uploads one flat, named
 `release-<platform>` Actions artifact per platform. Its final summary reports
-**Manual publication required** and links to the run artifacts and [gander's
-publication instructions](https://github.com/averagechris/gander/blob/main/docs/release.md).
+**Manual publication required**, links to the run artifacts, and directs the
+caller to its own project release guide.
 The workflow has no automatic publication mode.
 
 Download and combine the artifacts from the successful run. Before manually

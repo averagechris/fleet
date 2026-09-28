@@ -24,6 +24,7 @@ class GithubProjectionContract(unittest.TestCase):
         self.assertNotIn("provider =", rendered)
         self.assertNotIn("github_repo =", rendered)
         self.assertNotIn("expected_platforms =", rendered)
+        self.assertNotIn("sourcehut_through =", rendered)
 
     def test_github_row_round_trips_transport_fields(self) -> None:
         config = {"repos": [{
@@ -40,6 +41,35 @@ class GithubProjectionContract(unittest.TestCase):
         self.assertIn('provider = "github"', rendered)
         self.assertIn('github_repo = "averagechris/gander"', rendered)
         self.assertIn('expected_platforms = ["aarch64-darwin", "x86_64-linux"]', rendered)
+
+    def test_github_row_round_trips_sourcehut_history_boundary(self) -> None:
+        row = {
+            "name": "gander", "pages_subdir": "gander", "srht_repo": "gander",
+            "artifact_prefix": "gander-v", "provider": "github",
+            "github_repo": "averagechris/gander", "expected_platforms": ["x86_64-linux"],
+            "sourcehut_through": "v0.8.1",
+        }
+        projected = projection.project({"repos": [row]})[0]
+        self.assertEqual(projected["sourcehut_through"], "v0.8.1")
+        self.assertIn('sourcehut_through = "v0.8.1"', projection.render([projected]))
+
+    def test_sourcehut_history_boundary_is_optional_and_github_only(self) -> None:
+        base = {
+            "name": "gander", "pages_subdir": "gander", "artifact_prefix": "gander-v",
+            "provider": "github", "github_repo": "averagechris/gander",
+            "expected_platforms": ["x86_64-linux"],
+        }
+        self.assertNotIn("sourcehut_through", projection.project({"repos": [base]})[0])
+        with self.assertRaisesRegex(ValueError, "requires srht_repo"):
+            projection.project({"repos": [base | {"sourcehut_through": "v0.8.1"}]})
+        for boundary in ("0.8", "v0.8.1-rc.1", "v0.8.1+build.1", "v00.8.1"):
+            with self.subTest(boundary=boundary), self.assertRaisesRegex(ValueError, "v-prefixed semver"):
+                projection.project({"repos": [base | {"srht_repo": "gander", "sourcehut_through": boundary}]})
+        sourcehut = base | {"provider": "sourcehut", "srht_repo": "gander", "sourcehut_through": "v0.8.1"}
+        sourcehut.pop("github_repo")
+        sourcehut.pop("expected_platforms")
+        with self.assertRaisesRegex(ValueError, "only valid for the github provider"):
+            projection.project({"repos": [sourcehut]})
 
     def test_github_row_requires_valid_repository(self) -> None:
         base = {

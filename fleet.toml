@@ -169,6 +169,10 @@ pages_subdir = "sideshow"
 version_file = "Cargo.toml"
 artifact_prefix = "sideshow"
 srht_repo = "sideshow"
+provider = "github"
+github_repo = "averagechris/sideshow"
+sourcehut_through = "v0.5.2"
+expected_platforms = ["aarch64-darwin", "x86_64-linux"]
 binaries = ["sideshow"]
 quirks = [
   "tailwindcss (standalone, no node) must be on PATH at runtime for `build` — provided by the dev shell; package wrapper is a tracked follow-up",

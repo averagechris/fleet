@@ -134,6 +134,10 @@ pages_subdir = "workctl"
 version_file = "Cargo.toml"
 artifact_prefix = "workctl"
 srht_repo = "workctl"
+provider = "github"
+github_repo = "averagechris/workctl"
+sourcehut_through = "v0.1.1"
+expected_platforms = ["aarch64-darwin", "x86_64-linux"]
 binaries = ["workctl", "workd"]
 quirks = [
   "cargo workspace: version is [workspace.package] in ROOT Cargo.toml; prepare-release also bumps the workctl-core pin in [workspace.dependencies] and all three Cargo.lock stanzas (workctl, workctl-core, workd)",

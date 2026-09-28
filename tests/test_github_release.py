@@ -19,7 +19,7 @@ class GithubProjectionContract(unittest.TestCase):
     def test_nine_sourcehut_rows_project_without_new_fields(self) -> None:
         config = tomllib.loads((ROOT / "fleet.toml").read_text())
         rows = [row for row in projection.project(config) if row.get("provider", "sourcehut") == "sourcehut"]
-        self.assertEqual(len(rows), 8)
+        self.assertEqual(len(rows), 7)
         rendered = projection.render(rows)
         self.assertNotIn("provider =", rendered)
         self.assertNotIn("github_repo =", rendered)

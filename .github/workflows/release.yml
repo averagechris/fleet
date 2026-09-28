@@ -14,7 +14,39 @@ on:
       github_app_private_key: {required: false}
 
 jobs:
+  preflight:
+    runs-on: ubuntu-24.04
+    permissions: {contents: write}
+    steps:
+      - name: Verify release API access
+        env: {GH_TOKEN: "${{ github.token }}"}
+        run: |
+          set -euo pipefail
+          endpoint="repos/$GITHUB_REPOSITORY/releases?per_page=100"
+          for attempt in 1 2; do
+            headers=$(mktemp)
+            errors=$(mktemp)
+            if gh api --include --silent "$endpoint" >"$headers" 2>"$errors"; then
+              status=$(awk '/^HTTP\/[0-9.]+ [0-9][0-9][0-9]/{code=$2} END{print code}' "$headers")
+              rm -f "$headers" "$errors"
+              [[ "$status" == 200 ]] || { echo "release API preflight returned unexpected HTTP ${status:-unknown}" >&2; exit 1; }
+              echo 'Release API preflight succeeded from reusable workflow context.'
+              exit 0
+            fi
+            status=$(awk '/^HTTP\/[0-9.]+ [0-9][0-9][0-9]/{code=$2} END{print code}' "$headers")
+            echo "release API preflight failed with HTTP ${status:-unknown}" >&2
+            awk '{line=tolower($0)} line ~ /^(x-accepted-github-permissions|x-github-request-id|retry-after):/{sub(/\r$/, ""); print > "/dev/stderr"}' "$headers"
+            rm -f "$headers" "$errors"
+            if [[ "$status" == 403 && "$attempt" == 1 ]]; then
+              echo 'Retrying release API preflight after 3 seconds.' >&2
+              sleep 3
+              continue
+            fi
+            exit 1
+          done
+
   build:
+    needs: preflight
     permissions: {contents: read}
     strategy:
       fail-fast: false

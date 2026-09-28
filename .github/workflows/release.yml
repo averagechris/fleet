@@ -7,6 +7,7 @@ on:
       # JSON array: [{"name":"aarch64-darwin","runner":"macos-14"},
       #              {"name":"x86_64-linux","runner":"ubuntu-24.04"}]
       platforms: {type: string, required: true}
+      publish_release: {type: boolean, required: false, default: true}
       website_repository: {type: string, required: false, default: ""}
       website_workflow: {type: string, required: false, default: "pages.yml"}
       github_app_id: {type: string, required: false, default: ""}
@@ -15,6 +16,7 @@ on:
 
 jobs:
   preflight:
+    if: ${{ inputs.publish_release }}
     runs-on: ubuntu-24.04
     permissions: {contents: write}
     steps:
@@ -47,6 +49,7 @@ jobs:
 
   build:
     needs: preflight
+    if: ${{ always() && (needs.preflight.result == 'success' || !inputs.publish_release) }}
     permissions: {contents: read}
     strategy:
       fail-fast: false
@@ -88,6 +91,7 @@ jobs:
 
   publish:
     needs: build
+    if: ${{ inputs.publish_release }}
     runs-on: ubuntu-24.04
     permissions: {contents: write}
     steps:
@@ -241,3 +245,18 @@ jobs:
           jq -nc --arg project "${GITHUB_REPOSITORY#*/}" --arg tag "$TAG" --arg sha "$SHA" \
             '{ref:"main",inputs:{project:$project,tag:$tag,sha:$sha}}' \
             | gh api --method POST "repos/$TARGET/actions/workflows/$WORKFLOW/dispatches" --input -
+
+  manual-publication:
+    needs: build
+    if: ${{ !inputs.publish_release }}
+    runs-on: ubuntu-24.04
+    permissions: {contents: read}
+    steps:
+      - name: Report manual publication handoff
+        run: |
+          {
+            echo '## Manual publication required'
+            echo
+            echo "Download the named release artifacts and checksums from [this workflow run](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}), then follow the [manual publication instructions](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/blob/${GITHUB_SHA}/README.md#manual-github-release-publication)."
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo 'manual publication required; use the run artifacts and README instructions'

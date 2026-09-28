@@ -379,7 +379,7 @@
           printf '%s\n' '--check stops before validation and artifact work; a real release runs validation before atomic push, and CI rechecks on the tag'
         fi
         [[ $check_only == 0 || $resume == 1 ]] || exit 0
-        [[ $resume == 0 ]] || { printf '%s\n' 'release refs already published; Actions owns asset completion'; exit 0; }
+        [[ $resume == 0 ]] || { printf '%s\n' 'release refs already published; GitHub Actions will build and hand off all configured artifacts according to its publication mode'; exit 0; }
         args=(--version "$version"); [[ $allow_downgrade == 1 ]] && args+=(--allow-downgrade)
         nix run .#prepare-release -- "''${args[@]}"
         (${validateScript}) < /dev/null
@@ -390,7 +390,7 @@
           git --git-dir="$git_dir" tag -d "$tag" >/dev/null 2>&1 || true; jj git import >/dev/null 2>&1 || true; exit 1
         fi
         jj git import; jj bookmark set main --revision "$commit"; jj new "$commit"
-        printf '%s\n' 'release refs published; GitHub Actions will build and publish all configured assets'
+        printf '%s\n' 'release refs published; GitHub Actions will build and hand off all configured artifacts according to its publication mode'
       '';
     };
 

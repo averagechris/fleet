@@ -23,7 +23,40 @@ def _step(name: str) -> str:
     return match.group()
 
 
+def _job(name: str, next_name: str | None = None) -> str:
+    start = WORKFLOW.index(f"  {name}:\n")
+    end = WORKFLOW.index(f"  {next_name}:\n", start) if next_name else len(WORKFLOW)
+    return WORKFLOW[start:end]
+
+
 class ReleaseWorkflowTests(unittest.TestCase):
+    def test_manual_mode_builds_without_publisher_preflight_or_publish_job(self):
+        self.assertIn("publish_release: {type: boolean, required: false, default: true}", WORKFLOW)
+        preflight = _job("preflight", "build")
+        build = _job("build", "publish")
+        publish = _job("publish", "manual-publication")
+        manual = _job("manual-publication")
+
+        self.assertIn("if: ${{ inputs.publish_release }}", preflight)
+        self.assertIn(
+            "if: ${{ always() && (needs.preflight.result == 'success' || !inputs.publish_release) }}",
+            build,
+        )
+        self.assertIn("permissions: {contents: read}", build)
+        self.assertIn("if: ${{ inputs.publish_release }}", publish)
+        self.assertIn("if: ${{ !inputs.publish_release }}", manual)
+        self.assertIn("manual publication required", manual)
+        self.assertIn("README.md#manual-github-release-publication", manual)
+
+    def test_manual_handoff_has_no_publication_side_effects(self):
+        manual = _job("manual-publication")
+        for forbidden in (
+            "gh api", "gh release", "release upload", "release edit",
+            "create-github-app-token", "workflow/dispatches",
+        ):
+            self.assertNotIn(forbidden, manual)
+        self.assertNotIn("contents: write", manual)
+
     def test_build_upload_and_merged_download_are_flat_and_complete(self):
         """Exercise the runner handoff, including upload-artifact's common-root rule."""
         build = _step("Build and verify artifact")

@@ -86,6 +86,10 @@ pages_subdir = "granola-cli"
 version_file = "Cargo.toml"
 artifact_prefix = "granola-cli"
 srht_repo = "granola-cli"
+provider = "github"
+github_repo = "averagechris/granola-cli"
+sourcehut_through = "v0.8.2"
+expected_platforms = ["aarch64-darwin", "x86_64-linux"]
 binaries = ["granola"]
 quirks = [
   "binary is 'granola', crate/artifacts are 'granola-cli'",

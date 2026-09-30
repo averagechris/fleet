@@ -405,12 +405,26 @@
           fi
           [[ $check_only == 0 || $resume == 1 ]] || exit 0
           [[ $resume == 0 ]] || { printf '%s\n' 'release refs already published; GitHub Actions will build and hand off all configured artifacts according to its publication mode'; exit 0; }
-          args=(--version "$version"); [[ $allow_downgrade == 1 ]] && args+=(--allow-downgrade)
-          nix run .#prepare-release -- "''${args[@]}"
-          (${validateScript}) < /dev/null
-          version="$(${readVersion})"; [[ "v''${version#v}" == "$tag" ]] || { printf '%s\n' 'prepared version differs from requested tag' >&2; exit 1; }
-          jj describe -m "chore: release $tag"; commit="$(jj log -r @ --no-graph --color=never -T commit_id)"
-          git --git-dir="$git_dir" -c tag.gpgSign=false tag -a "$tag" -m "${pname} $tag" "$commit"
+           args=(--version "$version"); [[ $allow_downgrade == 1 ]] && args+=(--allow-downgrade)
+           nix run .#prepare-release -- "''${args[@]}"
+           prepared_commit="$(jj log -r @ --no-graph --color=never -T commit_id)"
+           prepared_tree="$(git --git-dir="$git_dir" rev-parse "$prepared_commit^{tree}")"
+           prepared_parents="$(jj log -r @ --no-graph --color=never -T 'parents.map(|p| p.commit_id()).join(" ")')"
+           prepared_change="$(jj log -r @ --no-graph --color=never -T change_id)"
+           (${validateScript}) < /dev/null
+           version="$(${readVersion})"; [[ "v''${version#v}" == "$tag" ]] || { printf '%s\n' 'prepared version differs from requested tag' >&2; exit 1; }
+           validated_commit="$(jj log -r @ --no-graph --color=never -T commit_id)"
+           validated_tree="$(git --git-dir="$git_dir" rev-parse "$validated_commit^{tree}")"
+           validated_parents="$(jj log -r @ --no-graph --color=never -T 'parents.map(|p| p.commit_id()).join(" ")')"
+           validated_change="$(jj log -r @ --no-graph --color=never -T change_id)"
+           [[ "$validated_commit" == "$prepared_commit" && "$validated_tree" == "$prepared_tree" && "$validated_parents" == "$prepared_parents" && "$validated_change" == "$prepared_change" ]] || { printf '%s\n' 'release validation changed the prepared release commit or tracked tree' >&2; exit 1; }
+           jj describe -m "chore: release $tag"
+           commit="$(jj log -r @ --no-graph --color=never -T commit_id)"
+           described_tree="$(git --git-dir="$git_dir" rev-parse "$commit^{tree}")"
+           described_parents="$(jj log -r @ --no-graph --color=never -T 'parents.map(|p| p.commit_id()).join(" ")')"
+           described_change="$(jj log -r @ --no-graph --color=never -T change_id)"
+           [[ "$described_tree" == "$prepared_tree" && "$described_parents" == "$prepared_parents" && "$described_change" == "$prepared_change" ]] || { printf '%s\n' 'release commit changed while applying its description' >&2; exit 1; }
+           git --git-dir="$git_dir" -c tag.gpgSign=false tag -a "$tag" -m "${pname} $tag" "$commit"
           if ! git --git-dir="$git_dir" push --atomic --force-with-lease="refs/heads/main:$remote_main" origin "$commit:refs/heads/main" "refs/tags/$tag:refs/tags/$tag"; then
             git --git-dir="$git_dir" tag -d "$tag" >/dev/null 2>&1 || true; jj git import >/dev/null 2>&1 || true; exit 1
           fi

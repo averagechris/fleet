@@ -62,6 +62,7 @@ class Fixture:
         self.state.write_text(json.dumps({"uploads": [self.collision], "jobs": []}))
         self.log = root / "nix.log"; self.log.write_text("")
         self.srht_log = root / "srht.log"; self.srht_log.write_text("")
+        self.validation_observation = root / "validation-observation.json"
         self.artifact = root / "artifact"; self.artifact.mkdir()
         tools = root / "tools"; tools.mkdir()
         # Positive tests use an explicit transport wrapper: the release sees
@@ -87,7 +88,30 @@ set -eu
 printf '%s\n' "$*" >> "$RELEASE_LOG"
 case "$*" in
   *prepare-release*) python3 -c 'import json; p="package.json"; d=json.load(open(p)); d["version"]="1.2.4"; open(p,"w").write(json.dumps(d)+"\\n")' ;;
-  *ci-*) [ "${FAIL_MODE:-}" != validation ] || exit 23 ;;
+  *ci-*)
+    [ "${FAIL_MODE:-}" != validation ] || exit 23
+    if echo "$*" | grep -q 'ci-web'; then
+      python3 - "$RELEASE_VALIDATION_OBSERVATION" <<'PY'
+import json, os, subprocess, sys
+
+def output(*args):
+    return subprocess.check_output(args, text=True).strip()
+
+commit = output("jj", "log", "-r", "@", "--no-graph", "-T", "commit_id")
+git_dir = output("jj", "git", "root")
+tree = output(os.environ["REAL_GIT"], f"--git-dir={git_dir}", "rev-parse", f"{commit}^{{tree}}")
+parents = output("jj", "log", "-r", "@", "--no-graph", "-T", 'parents.map(|p| p.commit_id()).join(" ")')
+change = output("jj", "log", "-r", "@", "--no-graph", "-T", "change_id")
+with open(sys.argv[1], "w") as record:
+    json.dump({"commit": commit, "tree": tree, "parents": parents, "change": change}, record, sort_keys=True)
+    record.write("\\n")
+PY
+      case "${GATE_MODE:-}" in
+        edit) printf 'validation mutation\n' >> CHANGELOG.md ;;
+        move) jj new ;;
+        fail) exit 25 ;;
+      esac
+    fi ;;
   'build .#release-artifact --no-link --print-out-paths')
     [ "${FAIL_MODE:-}" != artifact ] || exit 24
     printf payload > "$ART_DIR/game-v1.2.4-web.tar.gz"
@@ -110,7 +134,7 @@ if 'builds' in a and 'submit' in a:
  raise SystemExit(0)
 raise SystemExit('unexpected srht arguments: '+repr(a))
 """)
-        self.env = os.environ | {"FLEET_RELEASE_NIX": str(tools / "nix"), "FLEET_RELEASE_SRHT": str(tools / "srht"), "RELEASE_STATE": str(self.state), "RELEASE_LOG": str(self.log), "SRHT_LOG": str(self.srht_log), "ART_DIR": str(self.artifact), "RELEASE_REAL": str(self.release), "REAL_GIT": shutil.which("git"), "TEST_REMOTE": str(self.remote), "TEST_ORIGIN_FETCH_URL": canonical_urls[0], "TEST_ORIGIN_PUSH_URL": canonical_urls[0]}
+        self.env = os.environ | {"FLEET_RELEASE_NIX": str(tools / "nix"), "FLEET_RELEASE_SRHT": str(tools / "srht"), "RELEASE_STATE": str(self.state), "RELEASE_LOG": str(self.log), "SRHT_LOG": str(self.srht_log), "RELEASE_VALIDATION_OBSERVATION": str(self.validation_observation), "ART_DIR": str(self.artifact), "RELEASE_REAL": str(self.release), "REAL_GIT": shutil.which("git"), "TEST_REMOTE": str(self.remote), "TEST_ORIGIN_FETCH_URL": canonical_urls[0], "TEST_ORIGIN_PUSH_URL": canonical_urls[0]}
 
     def set_origin_urls(self, fetch: str, push_urls: tuple[str, ...]):
         run("git", f"--git-dir={self.git_dir}", "remote", "set-url", "origin", fetch, cwd=self.workspace)
@@ -187,6 +211,50 @@ def scenario_github_origin_guard(root, release):
         assert "ref/version preflight" in result.stdout
 
 
+def scenario_github_validation_freezes_prepared_tree(root, release):
+    for mode in ("edit", "move", "fail"):
+        f = Fixture(root / mode, release)
+        initial = f.remote_refs()
+        result = f.release_run(env=f.env | {"GATE_MODE": mode}, ok=False)
+        assert result.returncode != 0
+        f.assert_unpublished(initial)
+        assert run("git", f"--git-dir={f.git_dir}", "show-ref", "--verify",
+                   "refs/tags/v1.2.4", cwd=f.workspace, ok=False).returncode != 0
+        descriptions = run("jj", "log", "-r", "all()", "--no-graph", "-T", "description",
+                           cwd=f.workspace).stdout
+        assert "chore: release v1.2.4" not in descriptions
+        if mode in ("edit", "move"):
+            assert "changed the prepared release commit or tracked tree" in result.stderr, (
+                mode, result.stdout, result.stderr
+            )
+
+
+def scenario_github_success_uses_prepared_tree(root, release):
+    f = Fixture(root, release)
+    f.release_run()
+    observation = json.loads(f.validation_observation.read_text())
+    assert observation["commit"] and observation["tree"]
+    prepared = run("git", f"--git-dir={f.git_dir}", "show", f"{observation['commit']}:package.json", cwd=f.workspace).stdout
+    assert json.loads(prepared)["version"] == "1.2.4"
+    refs = f.remote_refs()
+    assert "refs/heads/main" in refs and "refs/tags/v1.2.4" in refs
+    tagged_commit = run("git", "--git-dir", str(f.remote), "rev-parse", "refs/tags/v1.2.4^{}",
+                        cwd=f.workspace).stdout.strip()
+    tagged_tree = run("git", "--git-dir", str(f.remote), "rev-parse", f"{tagged_commit}^{{tree}}",
+                      cwd=f.workspace).stdout.strip()
+    assert tagged_tree == observation["tree"]
+    tagged_parents = run("git", "--git-dir", str(f.remote), "rev-list", "--parents", "-n", "1", tagged_commit,
+                         cwd=f.workspace).stdout.split()[1:]
+    assert " ".join(tagged_parents) == observation["parents"]
+    tagged_change = run("jj", "log", "-r", tagged_commit, "--no-graph", "-T", "change_id",
+                        cwd=f.workspace).stdout.strip()
+    assert tagged_change == observation["change"]
+    tagged = run("git", "--git-dir", str(f.remote), "show", "v1.2.4:package.json",
+                 cwd=f.workspace).stdout
+    assert json.loads(tagged)["version"] == "1.2.4"
+    assert "run .#ci-web" in f.log.read_text()
+
+
 def scenario_prepublication_failures(root, release):
     for mode in ("validation", "artifact"):
         f = Fixture(root / mode, release); initial = f.remote_refs()
@@ -229,6 +297,8 @@ def main():
         if os.environ.get("RELEASE_BACKEND") == "github":
             scenario_github_check_is_preflight_only(root / "github-check", release)
             scenario_github_origin_guard(root / "github-origins", release)
+            scenario_github_validation_freezes_prepared_tree(root / "github-freeze", release)
+            scenario_github_success_uses_prepared_tree(root / "github-success", release)
             return
         scenario_check_is_non_mutating(root / "check", release)
         scenario_prepublication_failures(root / "failures", release)

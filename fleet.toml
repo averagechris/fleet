@@ -39,6 +39,10 @@ version_file = "webui/app/package.json"
 artifact_prefix = "hister"
 srht_repo = "hister"
 binaries = ["hister"]
+provider = "github"
+github_repo = "averagechris/hister"
+sourcehut_through = "v1.0.0"
+expected_platforms = ["aarch64-darwin", "x86_64-linux"]
 ecosystem = "go"
 quirks = [
   "Go repo — ci-vet instead of ci-clippy",
@@ -75,6 +79,10 @@ version_file = "Cargo.toml"
 artifact_prefix = "slack"
 srht_repo = "slack"
 binaries = ["slack"]
+provider = "github"
+github_repo = "averagechris/slack"
+sourcehut_through = "v0.3.1"
+expected_platforms = ["aarch64-darwin", "x86_64-linux"]
 upstream = "https://github.com/tumf/slack-rs"
 quirks = [
   "publishes under /slack with slack-v* artifacts; repo dir is slack-rs, sourcehut repo is 'slack'",

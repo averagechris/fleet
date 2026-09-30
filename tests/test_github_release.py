@@ -16,10 +16,22 @@ SPEC.loader.exec_module(projection)
 
 
 class GithubProjectionContract(unittest.TestCase):
-    def test_two_sourcehut_rows_project_without_new_fields(self) -> None:
+    def test_registered_rows_use_github_release_history(self) -> None:
         config = tomllib.loads((ROOT / "fleet.toml").read_text())
-        rows = [row for row in projection.project(config) if row.get("provider", "sourcehut") == "sourcehut"]
-        self.assertEqual(len(rows), 2)
+        rows = projection.project(config)
+        self.assertEqual(len(rows), 10)
+        for row in rows:
+            with self.subTest(repo=row["name"]):
+                self.assertEqual(row["provider"], "github")
+                self.assertRegex(row["github_repo"], r"^[^/]+/[^/]+$")
+                self.assertTrue(row["expected_platforms"])
+                self.assertIn("sourcehut_through", row)
+
+    def test_sourcehut_compatibility_row_projects_without_github_fields(self) -> None:
+        rows = projection.project({"repos": [{
+            "name": "legacy", "pages_subdir": "legacy", "srht_repo": "legacy",
+            "artifact_prefix": "legacy", "binaries": ["legacy"],
+        }]})
         rendered = projection.render(rows)
         self.assertNotIn("provider =", rendered)
         self.assertNotIn("github_repo =", rendered)

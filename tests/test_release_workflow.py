@@ -30,6 +30,49 @@ def _job(name: str, next_name: str | None = None) -> str:
 
 
 class ReleaseWorkflowTests(unittest.TestCase):
+    def test_tag_verification_requires_strict_tag_on_remote_main_history(self):
+        step = _step("Verify annotated tag checkout")
+        script = step.split("        run: |\n", 1)[1]
+        script = "\n".join(line[10:] for line in script.splitlines()) + "\n"
+        script = script.replace("${{ matrix.platform.name }}", "x86_64-linux")
+        self.assertIn(r"^v[0-9]+\.[0-9]+\.[0-9]+$", script)
+        self.assertIn("git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main", script)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            remote = root / "origin.git"
+            seed = root / "seed"
+            subprocess.run(["git", "init", "--bare", remote], check=True, capture_output=True)
+            subprocess.run(["git", "init", "-b", "main", seed], check=True, capture_output=True)
+            for key, value in (("user.name", "Test"), ("user.email", "test@example.invalid")):
+                subprocess.run(["git", "config", key, value], cwd=seed, check=True)
+            (seed / "file").write_text("main\n")
+            subprocess.run(["git", "add", "file"], cwd=seed, check=True)
+            subprocess.run(["git", "commit", "-m", "main"], cwd=seed, check=True, capture_output=True)
+            subprocess.run(["git", "remote", "add", "origin", remote], cwd=seed, check=True)
+            subprocess.run(["git", "push", "origin", "main"], cwd=seed, check=True, capture_output=True)
+
+            def verify(tag: str, off_main: bool) -> subprocess.CompletedProcess[str]:
+                if off_main:
+                    subprocess.run(["git", "checkout", "--detach", "HEAD"], cwd=seed, check=True, capture_output=True)
+                    (seed / "file").write_text("off main\n")
+                    subprocess.run(["git", "commit", "-am", "off main"], cwd=seed, check=True, capture_output=True)
+                else:
+                    subprocess.run(["git", "checkout", "main"], cwd=seed, check=True, capture_output=True)
+                subprocess.run(["git", "tag", "-a", tag, "-m", tag], cwd=seed, check=True)
+                subprocess.run(["git", "push", "origin", f"refs/tags/{tag}"], cwd=seed, check=True, capture_output=True)
+                checkout = root / f"checkout-{tag}"
+                subprocess.run(["git", "clone", "--no-checkout", remote, checkout], check=True, capture_output=True)
+                subprocess.run(["git", "checkout", tag], cwd=checkout, check=True, capture_output=True)
+                return subprocess.run(["bash", "-e", "-c", script], cwd=checkout,
+                                      env=os.environ | {"TAG": tag}, text=True, capture_output=True)
+
+            valid = verify("v1.2.3", False)
+            self.assertEqual(valid.returncode, 0, valid.stderr)
+            invalid = verify("v1.2.4", True)
+            self.assertNotEqual(invalid.returncode, 0)
+            self.assertIn("not an ancestor", invalid.stderr)
+
     def test_build_only_contract_has_read_only_jobs(self):
         build = _job("build", "manual-publication")
         manual = _job("manual-publication")

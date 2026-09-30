@@ -24,6 +24,7 @@ jobs:
         env: {TAG: "${{ inputs.tag }}"}
         run: |
           set -euo pipefail
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo 'tag must be vX.Y.Z' >&2; exit 1; }
           test "$(git cat-file -t "$TAG")" = tag
           remote=$(git ls-remote --tags origin "refs/tags/$TAG" "refs/tags/$TAG^{}")
           object=$(awk -v ref="refs/tags/$TAG" '$2 == ref {print $1}' <<<"$remote")
@@ -31,6 +32,11 @@ jobs:
           test -n "$object"; test -n "$commit"
           test "$(git rev-parse "$TAG^{tag}")" = "$object"
           test "$(git rev-parse "$TAG^{commit}")" = "$commit"
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          git merge-base --is-ancestor "$commit" refs/remotes/origin/main || {
+            echo 'release tag commit is not an ancestor of origin/main' >&2
+            exit 1
+          }
           printf '%s\n%s\n' "$object" "$commit" > "release-identity-${{ matrix.platform.name }}"
       - name: Build and verify artifact
         env: {PLATFORM: "${{ matrix.platform.name }}", TAG: "${{ inputs.tag }}"}

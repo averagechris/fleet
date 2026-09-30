@@ -45,6 +45,14 @@ class Fixture:
         run("jj", "bookmark", "set", "main", "-r", "@", cwd=self.primary)
         run("git", f"--git-dir={self.git_dir}", "remote", "add", "origin", str(self.remote), cwd=self.primary)
         run("git", f"--git-dir={self.git_dir}", "push", "origin", "main:main", cwd=self.primary)
+        canonical_urls = (
+            "git@github.com:averagechris/web-game-fixture.git",
+            "ssh://git@github.com/averagechris/web-game-fixture",
+            "https://github.com/averagechris/web-game-fixture.git",
+            "https://github.com/averagechris/web-game-fixture",
+        )
+        if os.environ.get("RELEASE_BACKEND") == "github":
+            run("git", f"--git-dir={self.git_dir}", "remote", "set-url", "origin", canonical_urls[0], cwd=self.primary)
         run("jj", "workspace", "add", "--name", "release-test", str(self.workspace), "-r", "main", cwd=self.primary)
         run("jj", "new", "main", cwd=self.workspace)
         assert not (self.workspace / ".git").exists()
@@ -56,6 +64,24 @@ class Fixture:
         self.srht_log = root / "srht.log"; self.srht_log.write_text("")
         self.artifact = root / "artifact"; self.artifact.mkdir()
         tools = root / "tools"; tools.mkdir()
+        # Positive tests use an explicit transport wrapper: the release sees
+        # canonical effective URLs, while all later origin operations are
+        # delegated to the isolated bare fixture. Production has no override.
+        self.transport_release = tools / "release-transport"
+        executable(self.transport_release, "#!" + shutil.which("bash") + """
+set -euo pipefail
+git() {
+  case "$*" in
+    *' remote get-url --all origin') printf '%s\n' "$TEST_ORIGIN_FETCH_URL"; return ;;
+    *' remote get-url --push --all origin') printf '%s\n' "$TEST_ORIGIN_PUSH_URL"; return ;;
+  esac
+  local args=("$@") i
+  for i in "${!args[@]}"; do [[ "${args[$i]}" == origin ]] && args[$i]="$TEST_REMOTE"; done
+  "$REAL_GIT" "${args[@]}"
+}
+export -f git
+exec "$RELEASE_REAL" "$@"
+""")
         executable(tools / "nix", "#!" + shutil.which("sh") + """
 set -eu
 printf '%s\n' "$*" >> "$RELEASE_LOG"
@@ -84,10 +110,20 @@ if 'builds' in a and 'submit' in a:
  raise SystemExit(0)
 raise SystemExit('unexpected srht arguments: '+repr(a))
 """)
-        self.env = os.environ | {"FLEET_RELEASE_NIX": str(tools / "nix"), "FLEET_RELEASE_SRHT": str(tools / "srht"), "RELEASE_STATE": str(self.state), "RELEASE_LOG": str(self.log), "SRHT_LOG": str(self.srht_log), "ART_DIR": str(self.artifact)}
+        self.env = os.environ | {"FLEET_RELEASE_NIX": str(tools / "nix"), "FLEET_RELEASE_SRHT": str(tools / "srht"), "RELEASE_STATE": str(self.state), "RELEASE_LOG": str(self.log), "SRHT_LOG": str(self.srht_log), "ART_DIR": str(self.artifact), "RELEASE_REAL": str(self.release), "REAL_GIT": shutil.which("git"), "TEST_REMOTE": str(self.remote), "TEST_ORIGIN_FETCH_URL": canonical_urls[0], "TEST_ORIGIN_PUSH_URL": canonical_urls[0]}
+
+    def set_origin_urls(self, fetch: str, push_urls: tuple[str, ...]):
+        run("git", f"--git-dir={self.git_dir}", "remote", "set-url", "origin", fetch, cwd=self.workspace)
+        run("git", f"--git-dir={self.git_dir}", "config", "--unset-all", "remote.origin.pushurl", cwd=self.workspace, ok=False)
+        for url in push_urls:
+            run("git", f"--git-dir={self.git_dir}", "config", "--add", "remote.origin.pushurl", url, cwd=self.workspace)
 
     def release_run(self, *extra, env=None, ok=True):
-        return run(str(self.release), "--version", "1.2.4", *extra, cwd=self.workspace, env=env or self.env, ok=ok)
+        program = self.transport_release if os.environ.get("RELEASE_BACKEND") == "github" else self.release
+        return run(str(program), "--version", "1.2.4", *extra, cwd=self.workspace, env=env or self.env, ok=ok)
+
+    def release_run_real(self, *extra, ok=True):
+        return run(str(self.release), "--version", "1.2.4", *extra, cwd=self.workspace, env=self.env, ok=ok)
 
     def remote_refs(self):
         return run("git", "--git-dir", str(self.remote), "show-ref", cwd=self.workspace).stdout
@@ -117,6 +153,38 @@ def scenario_github_check_is_preflight_only(root, release):
     assert "ref/version preflight" in output
     assert "stops before validation and artifact work" in output
     assert "release readiness" not in output
+
+
+def scenario_github_origin_guard(root, release):
+    for name, fetch, pushes, rewrite in (
+        ("sourcehut", "git@git.sr.ht:~averagechris/web-game-fixture", ("git@git.sr.ht:~averagechris/web-game-fixture",), None),
+        ("wrong-repo", "https://github.com/averagechris/other.git", ("https://github.com/averagechris/other.git",), None),
+        ("fetch-rewrite", "https://github.com/averagechris/web-game-fixture", (), "insteadOf"),
+        ("push-rewrite", "https://github.com/averagechris/web-game-fixture", (), "pushInsteadOf"),
+        ("mixed-push", "https://github.com/averagechris/web-game-fixture", ("https://github.com/averagechris/web-game-fixture", "ssh://git@git.sr.ht/~averagechris/web-game-fixture"), None),
+    ):
+        f = Fixture(root / name, release)
+        f.set_origin_urls(fetch, pushes)
+        if rewrite:
+            run("git", f"--git-dir={f.git_dir}", "config", "--add",
+                f"url.ssh://git@git.sr.ht/~averagechris/web-game-fixture.{rewrite}", fetch,
+                cwd=f.workspace)
+        before = run("git", f"--git-dir={f.git_dir}", "show-ref", cwd=f.workspace).stdout
+        result = f.release_run_real("--check", ok=False)
+        assert result.returncode and "origin URL safety check failed" in result.stderr
+        assert f.log.read_text() == ""
+        assert before == run("git", f"--git-dir={f.git_dir}", "show-ref", cwd=f.workspace).stdout
+
+    for name, fetch, pushes in (
+        ("ssh", "git@github.com:averagechris/web-game-fixture.git", ("ssh://git@github.com/averagechris/web-game-fixture",)),
+        ("https", "https://github.com/averagechris/web-game-fixture.git", ("https://github.com/averagechris/web-game-fixture",)),
+    ):
+        f = Fixture(root / name, release)
+        result = f.release_run("--check", env=f.env | {
+            "TEST_ORIGIN_FETCH_URL": fetch,
+            "TEST_ORIGIN_PUSH_URL": "\n".join(pushes),
+        })
+        assert "ref/version preflight" in result.stdout
 
 
 def scenario_prepublication_failures(root, release):
@@ -160,6 +228,7 @@ def main():
         root = Path(td); home = root / "home"; home.mkdir(); os.environ["HOME"] = str(home)
         if os.environ.get("RELEASE_BACKEND") == "github":
             scenario_github_check_is_preflight_only(root / "github-check", release)
+            scenario_github_origin_guard(root / "github-origins", release)
             return
         scenario_check_is_non_mutating(root / "check", release)
         scenario_prepublication_failures(root / "failures", release)

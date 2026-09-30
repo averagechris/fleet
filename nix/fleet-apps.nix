@@ -319,6 +319,7 @@
     mkGithubRelease = {
       pkgs,
       pname,
+      githubRepo ? "averagechris/${pname}",
       versionFile ? "Cargo.toml",
       versionExpr ? null,
       versionCommand ? null,
@@ -326,73 +327,97 @@
       runtimeInputs ? [],
       ...
     }: let
-      readVersion = if versionCommand != null then versionCommand else ''VERSION_FILE=${q versionFile} python3 -c 'import os,tomllib; data=tomllib.load(open(os.environ["VERSION_FILE"],"rb")); print(${versionExpr})' '';
-      validateScript = if ciApps == [] then "true" else lib.concatMapStringsSep "\n" (name: "nix run .#${name}") ciApps;
-    in pkgs.writeShellApplication {
-      name = "release";
-      runtimeInputs = (with pkgs; [git jujutsu nix python3]) ++ runtimeInputs;
-      text = ''
-        set -euo pipefail
-        export TERM=dumb
-        if [[ -n "''${FLEET_RELEASE_NIX:-}" ]]; then nix() { "$FLEET_RELEASE_NIX" "$@"; }; fi
-        usage() {
-          printf '%s\n' 'usage: release --version X.Y.Z [--check] [--allow-downgrade]'
-          printf '%s\n' '  --check  nonmutating ref/version preflight only; does not run validation or build artifacts'
-        }
-        version=""; check_only=0; allow_downgrade=0
-        while [[ $# -gt 0 ]]; do case "$1" in
-          --version) version="''${2:-}"; shift 2;;
-          --check) check_only=1; shift;;
-          --allow-downgrade) allow_downgrade=1; shift;;
-          --submit-linux-build) printf '%s\n' '--submit-linux-build is not valid for the GitHub release backend' >&2; exit 2;;
-          -h|--help) usage; exit 0;; *) usage >&2; exit 2;; esac; done
-        [[ "$version" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+$ ]] || { printf 'invalid or missing semver version: %s\n' "$version" >&2; exit 2; }
-        version="''${version#v}"; tag="v$version"
-        repo_root="$(jj root 2>/dev/null)" || { printf '%s\n' 'release requires a jj repository' >&2; exit 1; }; cd "$repo_root"
-        git_dir="$(jj git root 2>/dev/null)" || { printf '%s\n' 'release requires a jj Git-backed repository' >&2; exit 1; }
-        [[ "$(jj log -r @ --no-graph --color=never -T 'if(empty, "1", "0")')" == 1 ]] || { printf '%s\n' 'working-copy commit @ is not empty; finish it before release' >&2; exit 1; }
-        base="$(jj log -r '@-' --no-graph --color=never -T commit_id)"; local_main="$(jj log -r main --no-graph --color=never -T commit_id)"
-        remote_main_line="$(git --git-dir="$git_dir" ls-remote --heads origin refs/heads/main)"; remote_main="''${remote_main_line%%$'\t'*}"
-        [[ -n "$remote_main" && "$base" == "$local_main" ]] || { printf '%s\n' 'stale/diverged checkout' >&2; exit 1; }
-        current="$(${readVersion})"
-        ALLOW_DOWNGRADE="$allow_downgrade" CURRENT="$current" REQUESTED="$version" python3 - <<'PY'
-        import os,re
-        def v(n):
-            x=os.environ[n].removeprefix('v')
-            if not re.fullmatch(r'\d+\.\d+\.\d+',x): raise SystemExit(f'invalid {n.lower()} semver: {x}')
-            return tuple(map(int,x.split('.')))
-        if v('REQUESTED') < v('CURRENT') and os.environ['ALLOW_DOWNGRADE'] != '1': raise SystemExit('refusing version downgrade')
-        PY
-        tags="$(git --git-dir="$git_dir" ls-remote --tags origin "refs/tags/$tag" "refs/tags/$tag^{}")"
-        tag_object="$(printf '%s\n' "$tags" | awk -v r="refs/tags/$tag" '$2==r {print $1}')"
-        tag_commit="$(printf '%s\n' "$tags" | awk -v r="refs/tags/$tag^{}" '$2==r {print $1}')"
-        resume=0
-        if [[ -n "$tag_object" ]]; then
-          [[ -n "$tag_commit" && "$tag_commit" == "$remote_main" && "$remote_main" == "$local_main" && "$local_main" == "$base" && "''${current#v}" == "$version" ]] || { printf 'existing tag %s is not an exact resumable release\n' "$tag" >&2; exit 1; }
-          resume=1
-        else
-          [[ "$base" == "$remote_main" ]] || { printf '%s\n' 'stale/diverged checkout' >&2; exit 1; }
-          git --git-dir="$git_dir" show-ref --verify --quiet "refs/tags/$tag" && { printf 'local tag exists without matching remote release: %s\n' "$tag" >&2; exit 1; } || true
-        fi
-        printf 'GitHub ref/version preflight (%s): %s at %s\n' "$([[ $resume == 1 ]] && printf resume || printf release)" "$tag" "$base"
-        if [[ $check_only == 1 ]]; then
-          printf '%s\n' '--check stops before validation and artifact work; a real release runs validation before atomic push, and CI rechecks on the tag'
-        fi
-        [[ $check_only == 0 || $resume == 1 ]] || exit 0
-        [[ $resume == 0 ]] || { printf '%s\n' 'release refs already published; GitHub Actions will build and hand off all configured artifacts according to its publication mode'; exit 0; }
-        args=(--version "$version"); [[ $allow_downgrade == 1 ]] && args+=(--allow-downgrade)
-        nix run .#prepare-release -- "''${args[@]}"
-        (${validateScript}) < /dev/null
-        version="$(${readVersion})"; [[ "v''${version#v}" == "$tag" ]] || { printf '%s\n' 'prepared version differs from requested tag' >&2; exit 1; }
-        jj describe -m "chore: release $tag"; commit="$(jj log -r @ --no-graph --color=never -T commit_id)"
-        git --git-dir="$git_dir" -c tag.gpgSign=false tag -a "$tag" -m "${pname} $tag" "$commit"
-        if ! git --git-dir="$git_dir" push --atomic --force-with-lease="refs/heads/main:$remote_main" origin "$commit:refs/heads/main" "refs/tags/$tag:refs/tags/$tag"; then
-          git --git-dir="$git_dir" tag -d "$tag" >/dev/null 2>&1 || true; jj git import >/dev/null 2>&1 || true; exit 1
-        fi
-        jj git import; jj bookmark set main --revision "$commit"; jj new "$commit"
-        printf '%s\n' 'release refs published; GitHub Actions will build and hand off all configured artifacts according to its publication mode'
-      '';
-    };
+      readVersion =
+        if versionCommand != null
+        then versionCommand
+        else ''VERSION_FILE=${q versionFile} python3 -c 'import os,tomllib; data=tomllib.load(open(os.environ["VERSION_FILE"],"rb")); print(${versionExpr})' '';
+      validateScript =
+        if ciApps == []
+        then "true"
+        else lib.concatMapStringsSep "\n" (name: "nix run .#${name}") ciApps;
+    in
+      pkgs.writeShellApplication {
+        name = "release";
+        runtimeInputs = (with pkgs; [git jujutsu nix python3]) ++ runtimeInputs;
+        text = ''
+          set -euo pipefail
+          export TERM=dumb
+          if [[ -n "''${FLEET_RELEASE_NIX:-}" ]]; then nix() { "$FLEET_RELEASE_NIX" "$@"; }; fi
+          usage() {
+            printf '%s\n' 'usage: release --version X.Y.Z [--check] [--allow-downgrade]'
+            printf '%s\n' '  --check  nonmutating ref/version preflight only; does not run validation or build artifacts'
+          }
+          version=""; check_only=0; allow_downgrade=0
+          while [[ $# -gt 0 ]]; do case "$1" in
+            --version) version="''${2:-}"; shift 2;;
+            --check) check_only=1; shift;;
+            --allow-downgrade) allow_downgrade=1; shift;;
+            --submit-linux-build) printf '%s\n' '--submit-linux-build is not valid for the GitHub release backend' >&2; exit 2;;
+            -h|--help) usage; exit 0;; *) usage >&2; exit 2;; esac; done
+          [[ "$version" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+$ ]] || { printf 'invalid or missing semver version: %s\n' "$version" >&2; exit 2; }
+          version="''${version#v}"; tag="v$version"
+          repo_root="$(jj root 2>/dev/null)" || { printf '%s\n' 'release requires a jj repository' >&2; exit 1; }; cd "$repo_root"
+          git_dir="$(jj git root 2>/dev/null)" || { printf '%s\n' 'release requires a jj Git-backed repository' >&2; exit 1; }
+          # Validate Git's effective URLs: url.*.insteadOf and pushInsteadOf may
+          # otherwise redirect a canonical-looking origin to another authority.
+          mapfile -t origin_fetch_urls < <(git --git-dir="$git_dir" remote get-url --all origin)
+          mapfile -t origin_push_urls < <(git --git-dir="$git_dir" remote get-url --push --all origin)
+          EXPECTED_GITHUB_REPO=${q githubRepo} python3 - "''${origin_fetch_urls[@]}" -- "''${origin_push_urls[@]}" <<'PY'
+          import os, re, sys
+          expected = os.environ["EXPECTED_GITHUB_REPO"]
+          try:
+              separator = sys.argv.index("--")
+          except ValueError:
+              raise SystemExit("origin URL safety check failed")
+          fetch, push = sys.argv[1:separator], sys.argv[separator + 1:]
+          repository = re.escape(expected)
+          canonical = re.compile(rf"(?:git@github\.com:|ssh://git@github\.com/|https://github\.com/){repository}(?:\.git)?")
+          if not fetch or not push or any(canonical.fullmatch(url) is None for url in fetch + push):
+              raise SystemExit(f"origin URL safety check failed: expected GitHub repository {expected}")
+          PY
+          [[ "$(jj log -r @ --no-graph --color=never -T 'if(empty, "1", "0")')" == 1 ]] || { printf '%s\n' 'working-copy commit @ is not empty; finish it before release' >&2; exit 1; }
+          base="$(jj log -r '@-' --no-graph --color=never -T commit_id)"; local_main="$(jj log -r main --no-graph --color=never -T commit_id)"
+          remote_main_line="$(git --git-dir="$git_dir" ls-remote --heads origin refs/heads/main)"; remote_main="''${remote_main_line%%$'\t'*}"
+          [[ -n "$remote_main" && "$base" == "$local_main" ]] || { printf '%s\n' 'stale/diverged checkout' >&2; exit 1; }
+          current="$(${readVersion})"
+          ALLOW_DOWNGRADE="$allow_downgrade" CURRENT="$current" REQUESTED="$version" python3 - <<'PY'
+          import os,re
+          def v(n):
+              x=os.environ[n].removeprefix('v')
+              if not re.fullmatch(r'\d+\.\d+\.\d+',x): raise SystemExit(f'invalid {n.lower()} semver: {x}')
+              return tuple(map(int,x.split('.')))
+          if v('REQUESTED') < v('CURRENT') and os.environ['ALLOW_DOWNGRADE'] != '1': raise SystemExit('refusing version downgrade')
+          PY
+          tags="$(git --git-dir="$git_dir" ls-remote --tags origin "refs/tags/$tag" "refs/tags/$tag^{}")"
+          tag_object="$(printf '%s\n' "$tags" | awk -v r="refs/tags/$tag" '$2==r {print $1}')"
+          tag_commit="$(printf '%s\n' "$tags" | awk -v r="refs/tags/$tag^{}" '$2==r {print $1}')"
+          resume=0
+          if [[ -n "$tag_object" ]]; then
+            [[ -n "$tag_commit" && "$tag_commit" == "$remote_main" && "$remote_main" == "$local_main" && "$local_main" == "$base" && "''${current#v}" == "$version" ]] || { printf 'existing tag %s is not an exact resumable release\n' "$tag" >&2; exit 1; }
+            resume=1
+          else
+            [[ "$base" == "$remote_main" ]] || { printf '%s\n' 'stale/diverged checkout' >&2; exit 1; }
+            git --git-dir="$git_dir" show-ref --verify --quiet "refs/tags/$tag" && { printf 'local tag exists without matching remote release: %s\n' "$tag" >&2; exit 1; } || true
+          fi
+          printf 'GitHub ref/version preflight (%s): %s at %s\n' "$([[ $resume == 1 ]] && printf resume || printf release)" "$tag" "$base"
+          if [[ $check_only == 1 ]]; then
+            printf '%s\n' '--check stops before validation and artifact work; a real release runs validation before atomic push, and CI rechecks on the tag'
+          fi
+          [[ $check_only == 0 || $resume == 1 ]] || exit 0
+          [[ $resume == 0 ]] || { printf '%s\n' 'release refs already published; GitHub Actions will build and hand off all configured artifacts according to its publication mode'; exit 0; }
+          args=(--version "$version"); [[ $allow_downgrade == 1 ]] && args+=(--allow-downgrade)
+          nix run .#prepare-release -- "''${args[@]}"
+          (${validateScript}) < /dev/null
+          version="$(${readVersion})"; [[ "v''${version#v}" == "$tag" ]] || { printf '%s\n' 'prepared version differs from requested tag' >&2; exit 1; }
+          jj describe -m "chore: release $tag"; commit="$(jj log -r @ --no-graph --color=never -T commit_id)"
+          git --git-dir="$git_dir" -c tag.gpgSign=false tag -a "$tag" -m "${pname} $tag" "$commit"
+          if ! git --git-dir="$git_dir" push --atomic --force-with-lease="refs/heads/main:$remote_main" origin "$commit:refs/heads/main" "refs/tags/$tag:refs/tags/$tag"; then
+            git --git-dir="$git_dir" tag -d "$tag" >/dev/null 2>&1 || true; jj git import >/dev/null 2>&1 || true; exit 1
+          fi
+          jj git import; jj bookmark set main --revision "$commit"; jj new "$commit"
+          printf '%s\n' 'release refs published; GitHub Actions will build and hand off all configured artifacts according to its publication mode'
+        '';
+      };
 
     mkRelease = args:
       if (args.backend or "sourcehut") == "github"
@@ -723,9 +748,11 @@ in {
   # The pilot is an explicit opt-in; all existing callers retain SourceHut.
   fleet = {
     inherit core;
-    presets = presets // {
-      gander = args: presets.rust (args // {releaseBackend = "github";});
-    };
+    presets =
+      presets
+      // {
+        gander = args: presets.rust (args // {releaseBackend = "github";});
+      };
   };
   mkFleetApps = presets.rust;
 }
